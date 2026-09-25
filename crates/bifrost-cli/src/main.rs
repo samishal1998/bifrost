@@ -239,11 +239,9 @@ async fn daemon(cli: &Cli, c: &Client) -> Result<i32, ClientError> {
         Cmd::Drivers => {
             let (ds, auto) = match c.get::<StatusDto>("/v1/status").await {
                 Ok(s) => (s.drivers, s.auto_driver),
-                Err(ClientError::NotRunning(p)) => {
-                    eprintln!(
-                        "bifrostd is not running (socket {}); probing locally",
-                        p.display()
-                    );
+                // not reachable, as run() counts it (Io: e.g. EACCES on the socket)
+                Err(e @ (ClientError::NotRunning(_) | ClientError::Io(_))) => {
+                    eprintln!("{}; probing locally", output::c(&e.to_string()));
                     let path = cli.config.clone().unwrap_or_else(paths::config_path);
                     let cfg = bifrost_config::load(&path).ok();
                     doctor::local_drivers(cfg.as_ref()).await

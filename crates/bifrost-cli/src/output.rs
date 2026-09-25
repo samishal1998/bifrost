@@ -295,8 +295,9 @@ pub fn unmount_line(id: &str, m: Option<&MountDto>, force: bool) -> Option<(Stri
         Some((A::Mounted | A::Degraded | A::Unknown, Some(e))) if e == busy && !force => {
             Some((format!("{id}  {busy}; retry with --force"), false))
         }
+        // core stores it as "unmount failed: …" (unmount_done)
         Some((A::Mounted | A::Degraded | A::Unknown, Some(e))) if e != busy => {
-            Some((format!("{id}  unmount failed: {}", c(e)), false))
+            Some((format!("{id}  {}", c(e)), false))
         }
         Some((A::Mounted | A::Degraded | A::Unknown | A::Unmounting | A::Connecting, _)) => None,
         _ => Some((
@@ -310,12 +311,20 @@ pub fn unmount_line(id: &str, m: Option<&MountDto>, force: bool) -> Option<(Stri
 mod tests {
     use super::*;
     use Availability::*;
+    use bifrost_core::policy::Verdict;
+    use bifrost_core::reconcile::{Action, Reason, WaitReason};
+    use std::time::Duration;
+
+    // core's Display strings are final (sign-off 7): fixtures are built from them, goldens stay literal
+    fn allowed(by: &str) -> Verdict {
+        Verdict::Allowed { by: by.into() }
+    }
 
     fn machine_dto(
         id: &str,
         source: &str,
         address: &str,
-        verdict: &str,
+        verdict: Verdict,
         state: Availability,
     ) -> MachineDto {
         MachineDto {
@@ -328,7 +337,7 @@ mod tests {
             online: Some(true),
             tags: vec![],
             metadata: Default::default(),
-            verdict: verdict.into(),
+            verdict: verdict.to_string(),
             state,
             mounts: vec![id.into()],
         }
@@ -387,17 +396,17 @@ mod tests {
                 "agent-01",
                 "tailscale",
                 "100.80.1.4",
-                "allowed (tailscale)",
+                allowed("tailscale"),
                 Mounted,
             ),
-            machine_dto("agent-02", "dns", "10.0.20.8", "allowed (dns)", Degraded),
-            machine_dto("build", "static", "10.0.0.18", "allowed (static)", Eligible),
+            machine_dto("agent-02", "dns", "10.0.20.8", allowed("dns"), Degraded),
+            machine_dto("build", "static", "10.0.0.18", allowed("static"), Eligible),
             // a hostile daemon string is re-cleaned
             machine_dto(
                 "evil",
                 "http",
                 "\x1b[31m10.9.9.9",
-                "discover-only",
+                Verdict::DiscoverOnly,
                 Discovered,
             ),
         ];
@@ -415,7 +424,7 @@ mod tests {
             "agent-01",
             "tailscale",
             "fd7a::1",
-            "allowed (tailscale)",
+            allowed("tailscale"),
             Mounted,
         );
         m.port = Some(2222);
@@ -481,9 +490,15 @@ mod tests {
     }
 
     fn status_fixture() -> StatusDto {
-        let allowed = |id: &str| machine_dto(id, "static", "10.0.0.1", "allowed (static)", Mounted);
-        let seen =
-            |id: &str| machine_dto(id, "tailscale", "100.64.0.1", "discover-only", Discovered);
+        let ok = |id: &str| machine_dto(id, "static", "10.0.0.1", allowed("static"), Mounted);
+        let seen = |id: &str| {
+            let v = Verdict::DiscoverOnly;
+            machine_dto(id, "tailscale", "100.64.0.1", v, Discovered)
+        };
+        // denied is not eligible: pins status()'s starts_with("allowed") on core's Display
+        let denied = Verdict::Denied {
+            by: "policy.deny tags=misc".into(),
+        };
         StatusDto {
             version: "0.1.0".into(),
             pid: 4242,
@@ -510,13 +525,13 @@ mod tests {
             ],
             auto_driver: Some("sshfs".into()),
             machines: vec![
-                allowed("a"),
-                allowed("b"),
-                allowed("c"),
+                ok("a"),
+                ok("b"),
+                ok("c"),
                 seen("d"),
                 seen("e"),
                 seen("f"),
-                seen("g"),
+                machine_dto("g", "dns", "10.0.0.7", denied, Discovered),
             ],
             mounts: vec![
                 mount_dto("a", Mounted),
@@ -585,11 +600,38 @@ mod tests {
              tailscale  tailscale  ok                5         12s ago\n\
              infra      http       error: timed out  0         2m ago\n"
         );
-        let a = [ActionDto {
+        let a = [
+            Action::NoOp,
+            Action::Mount {
+                driver: "sshfs".into(),
+            },
+            Action::Unmount {
+                force: true,
+                why: Reason::Manual,
+            },
+            Action::Remount {
+                force: false,
+                why: Reason::SpecChanged,
+            },
+            Action::Degraded("change pending: x".into()),
+            Action::Waiting(WaitReason::Backoff(Duration::from_millis(2500))),
+            Action::Waiting(WaitReason::WarmingUp),
+        ]
+        .map(|a| ActionDto {
             mount: "agent-01".into(),
-            action: "noop".into(),
-        }];
-        assert_eq!(actions(&a), "MOUNT     ACTION\nagent-01  noop\n");
+            action: a.to_string(),
+        });
+        assert_eq!(
+            actions(&a),
+            "MOUNT     ACTION\n\
+             agent-01  noop\n\
+             agent-01  mount (sshfs)\n\
+             agent-01  unmount (manual, force)\n\
+             agent-01  remount (spec changed)\n\
+             agent-01  degraded (change pending: x)\n\
+             agent-01  waiting (backoff 3s)\n\
+             agent-01  waiting (warming up)\n"
+        );
         assert_eq!(
             drivers(&s.drivers, s.auto_driver.as_deref()),
             "✓ sshfs       /usr/bin/sshfs   SSHFS version 3.7.3, fusermount3\n\
@@ -665,7 +707,8 @@ mod tests {
         m.state = Unmounting; // a retry in flight still carries the old error
         assert_eq!(unmount_line("agent-01", Some(&m), false), None);
         m.state = Degraded;
-        m.last_error = Some("driver unavailable: fusermount3 not found".into());
+        // core stores every non-busy unmount error already prefixed (unmount_done)
+        m.last_error = Some("unmount failed: driver unavailable: fusermount3 not found".into());
         assert_eq!(
             unmount_line("agent-01", Some(&m), true),
             Some((

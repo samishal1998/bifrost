@@ -498,6 +498,70 @@ fn doctor_config_drivers_and_macos_hint() {
     );
 }
 
+#[test]
+fn doctor_config_path_env_first_and_cleaned() {
+    let dir = tmp("doctor-env");
+    let cfg = dir.join("config.toml");
+    std::fs::write(&cfg, "[mount]\nroot = \"/r\"\n").unwrap();
+    let sock = dir.join("s.sock");
+    let doctor = |env: Option<&Path>| {
+        let mut c = bifrost(&dir);
+        c.arg("--socket").arg(&sock).arg("doctor");
+        if let Some(p) = env {
+            c.env("BIFROST_CONFIG", p);
+        }
+        c.output().unwrap()
+    };
+
+    // no --config: the daemon's config_path is a daemon string, re-cleaned (§9)
+    let t = stub(&sock, 1, |_, _| {
+        let mut s = status_dto();
+        s.config_path = "/nowhere/\x1b[31mx.toml".into();
+        (200, serde_json::to_string(&s).unwrap())
+    });
+    let o = doctor(None);
+    let out = stdout(&o);
+    assert!(
+        out.starts_with("Config         ✗ /nowhere/?[31mx.toml\n"),
+        "{out}"
+    );
+    assert!(!out.contains('\x1b'), "{out}");
+    t.join().unwrap();
+
+    // $BIFROST_CONFIG is --config (§9): it beats the daemon's config_path
+    let t = stub(&sock_again(&sock), 1, |_, _| {
+        (200, serde_json::to_string(&status_dto()).unwrap())
+    });
+    let o = doctor(Some(&cfg));
+    let out = stdout(&o);
+    assert!(
+        out.starts_with(&format!("Config         ✓ {}\n", cfg.display())),
+        "{out}"
+    );
+    t.join().unwrap();
+}
+
+#[test]
+fn drivers_probes_locally_when_the_socket_is_unreachable() {
+    // ENOTDIR on connect is ClientError::Io, not NotRunning (EACCES is too, but root ignores modes)
+    let dir = tmp("drivers-io");
+    std::fs::write(dir.join("file"), "").unwrap();
+    let o = bifrost(&dir)
+        .arg("--socket")
+        .arg(dir.join("file/s.sock"))
+        .arg("--config")
+        .arg(dir.join("missing.toml"))
+        .arg("drivers")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    assert!(stdout(&o).contains("default (auto): "), "{o:?}");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("; probing locally"),
+        "{o:?}"
+    );
+}
+
 /// A fresh listener on the same path.
 fn sock_again(sock: &Path) -> PathBuf {
     let _ = std::fs::remove_file(sock);

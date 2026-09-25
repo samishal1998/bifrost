@@ -64,19 +64,25 @@ fn indent(t: &str) -> String {
 pub async fn run(client: &Client, config: Option<PathBuf>) -> i32 {
     let daemon = client.get::<StatusDto>("/v1/status").await;
     let st = daemon.as_ref().ok();
-    // --config, else the file the daemon runs on, else the default
+    // --config (or $BIFROST_CONFIG, its env form; empty = unset), else the file the daemon runs on, else the default
     let path = config
+        .or_else(|| {
+            std::env::var_os("BIFROST_CONFIG")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
         .or_else(|| st.map(|s| PathBuf::from(&s.config_path)))
         .unwrap_or_else(bifrost_config::paths::config_path);
+    let shown = c(&path.display().to_string()); // may be the daemon's string (§9)
     let cfg = bifrost_config::load(&path);
     let mut bad = false;
     let mut out = String::new();
 
     match &cfg {
-        Ok(_) => out += &kv("Config", &format!("✓ {}", path.display())),
+        Ok(_) => out += &kv("Config", &format!("✓ {shown}")),
         Err(es) => {
             bad = true;
-            out += &kv("Config", &format!("✗ {}", path.display()));
+            out += &kv("Config", &format!("✗ {shown}"));
             es.iter()
                 .for_each(|e| out += &format!("  {}\n", c(&e.to_string())));
         }
