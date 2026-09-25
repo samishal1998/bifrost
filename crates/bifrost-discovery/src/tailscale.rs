@@ -514,7 +514,10 @@ mod tests {
         let path = OsString::from(format!("rel:/nonexistent-bf:{}", d.display()));
         assert_eq!(which_in("tailscale", path.clone()), Some(ts));
         std::fs::write(d.join("sh"), "").unwrap();
-        assert_eq!(which_in("sh", path), Some(sh));
+        assert_eq!(which_in("sh", path.clone()), Some(sh));
+        // host-independent ordering proof: /usr/bin/sh always exists, yet the $PATH one wins
+        let own = fake(&d, "sh", "exit 0");
+        assert_eq!(which_in("sh", path), Some(own));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
