@@ -312,6 +312,13 @@ impl Glob {
     }
 }
 
+/// The pattern text, for verdict reasons ("names=prod-*").
+impl std::fmt::Display for Glob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// "10.0.0.0/8" | "fd7a::/48" | bare IP (= /32 or /128). Address families never cross-match.
 /// IPv4-mapped v6 is rejected (write the v4 form): Host stores it as v4, so it could never match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
