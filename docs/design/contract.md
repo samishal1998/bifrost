@@ -1883,3 +1883,28 @@ M1 gate: `tests/e2e/run.sh m1` passed 63/63 on its first run (commit 359db31).
    - The template uses `$E2E` for paths.
    - Only ONE phase fragment may define `[policy.*]` tables, and that is p08 (B5).
 5. The second-instance message no longer has a doubled prefix ("bifrostd: already running (lock …)").
+
+## Orchestrator sign-offs (after S3)
+
+S3 gate:
+- `run.sh all` passed 116/116, with p12 and p13 not yet present;
+- `E2E_TAILSCALE=1 run.sh p07_tailscale` passed 5/5, with zero mounts;
+- the darwin check is clean;
+- the scripted tmux TUI session passed 81/81;
+- 230 unit tests pass (commit e8306d1).
+
+1. **Accepted interpretations:**
+   - **Tailscale:** a peer whose DNSName or IP is invalid is skipped whole, and empty metadata values are omitted.
+   - **bf1:** a trailing space is an error; the 2 KiB limit is checked after the `v=bf1` test; `dns_label` does not lowercase; a node lookup `JoinError` freezes the provider.
+   - **rclone:** the `--sftp-ssh` config path is quoted (spaces allowed, `"` and control characters rejected), and `--sftp-host` is still passed.
+   - **HTTP:** any invalid field skips the whole entry; `name: ""` is skipped; p10 flips the token on the server side.
+   - **TUI:** uses `rt.block_on(async { timeout(..).await })` and `ratatui::try_init`, and shows "U force" only in the help popup.
+2. **Carry-overs for S4 (task O)** — each one must be fixed with a test:
+   - (a) If an executor task panics, the runtime is stuck in flight (the open S2 item). Map a `JoinError` to MountDone/UnmountDone `Err` so the mount recovers.
+   - (b) The driver list is empty after daemon start until the first probe returns. Either probe synchronously before the first snapshot, or show "probing".
+   - (c) With `BIFROST_LOG=debug`, hickory's debug logging writes raw TXT answers (untrusted, possibly containing terminal escapes) into the daemon log. The subscriber must cap third-party targets (hickory*, reqwest, hyper, rustls) at `warn` whatever `BIFROST_LOG` says, without adding a dependency.
+   - (d) Tailscale `which()` must also search `/usr/local/bin:/usr/bin:/bin` (plus the macOS app path) like `bifrost-mount::check::which`, so it still works under a minimal systemd PATH.
+   - (e) `flavor()` and the docker test helpers are duplicated between `sshfs.rs` and `rclone.rs`. Move them into `lib.rs` as `pub(crate)` and delete the copies.
+3. **For the S4 hardening/README pass:**
+   - E2E scratch dirs are kept, one per run, in /tmp, and a p07 scratch dir holds real tailnet names. The README says so.
+   - `run.sh` must treat a missing listed phase as fatal once p12 and p13 exist.
