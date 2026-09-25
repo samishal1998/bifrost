@@ -343,8 +343,8 @@ Global flags: `--json` (print the API's JSON), `--socket PATH`, `--config PATH`.
 | `bifrost config reload` | make the daemon reload now |
 | `bifrost daemon status` | running or not |
 
-Exit codes: `0` ok · `1` failed (API error, mount failed, unmount busy, invalid config, doctor found a ✗) · `2`
-usage · `3` daemon not reachable.
+Exit codes: `0` ok · `1` failed (API error, mount failed, unmount busy, invalid config; for `doctor`: an invalid
+config, no usable driver, or the macOS permission hint) · `2` usage · `3` daemon not reachable.
 
 `bifrostd` takes only `--version` and `--help`. Everything else comes from the `BIFROST_*` environment variables.
 Live events stream over SSE: `curl -sN --unix-socket "$sock" http://bifrost/v1/events`.
