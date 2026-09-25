@@ -26,6 +26,8 @@ impl RcloneDriver {
     }
 
     /// A23: one VFS cache per mount, so pending writes resume on its next mount and never cross hosts.
+    // ponytail: a lazily detached rclone with open files can outlive its mount while row 9 starts a new one on the same --cache-dir (rclone: "can potentially cause data corruption"); upgrade: when nothing is mounted at local_path, scan /proc/*/cmdline for this exact --cache-dir= element and return Failed("cache still used by rclone pid N") so backoff waits
+    // ponytail: rclone keys the VFS cache inside --cache-dir by a hash of the --sftp-* flags (vfs/:sftp{HASH}), so pending writes resume only while the --sftp-ssh/--sftp-host strings are unchanged (ssh path, ssh_config path, host, port, user); a change leaves them un-uploaded under <state>/rclone/<id>; upgrade: warn when vfs/ holds another :sftp{...} dir
     fn argv(&self, spec: &MountSpec, ssh: &Path, f: Flavor) -> Vec<OsString> {
         let cache = self.s.state_dir.join("rclone").join(spec.id.as_str());
         let (cfg, vfs) = (self.s.ssh_config.as_deref(), &self.s.vfs_cache_mode);
@@ -67,6 +69,7 @@ impl MountDriver for RcloneDriver {
         h: &'a MountHandle,
         force: bool,
     ) -> BoxFuture<'a, Result<(), MountError>> {
+        // ponytail: a graceful unmount doesn't wait for VFS write-back, so writes closed <5s earlier stay in <state>/rclone/<id> until this id mounts again with the same flags; upgrade: rclone rc vfs/stats over a 0600 unix socket and return Busy while uploads are pending
         Box::pin(crate::unmount_path(&h.local_path, force))
     }
 }
@@ -205,6 +208,7 @@ pub fn rclone_argv(
     let mut cache = OsString::from("--cache-dir=");
     cache.push(cache_dir);
     let mut a: Vec<OsString> = vec![
+        // ponytail: rclone nfsmount serves the remote on an unauthenticated random 127.0.0.1 NFS port that any local user can reach; fine on single-user Macs; upgrade: put "rclone" (FUSE) before "rclone-nfs" in the macOS auto_order when macFUSE/FUSE-T is installed
         if nfs { "nfsmount" } else { "mount" }.into(),
         format!(":sftp:{}", spec.remote.sftp_path()).into(),
         spec.local_path.clone().into(),

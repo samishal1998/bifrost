@@ -22,9 +22,6 @@ driver = "rclone"
 EOF
 }
 
-P09_FILE=p09-$RANDOM$RANDOM.txt # unique per run; the sshd container is shared by every phase
-P09_DATA="rclone round trip $P09_FILE"
-
 p09_src() { [[ $(mnt_src "$T/machines/static2-rc") == "fuse.rclone bifrost:static2-rc@"* ]]; }
 p09_drivers() {
   local o
@@ -44,6 +41,9 @@ p09_new_pid() {
 p09_hk_error() { mjq unknown-key-rc '(.last_error // "") | contains("Host key verification failed")'; }
 
 check_p09() {
+  # not local: the p09_* helpers read them. Unique per run; the sshd container is shared by every phase
+  P09_FILE=p09-$RANDOM$RANDOM.txt
+  P09_DATA="rclone round trip $P09_FILE"
   local mp=$T/machines/static2-rc pid seq
   # 40s: in `all`, p06 stopped and restarted the sshd under every mount and p13a restarted the daemon
   ok "p09: static2-rc mounted within 40s" wait_until 40 state_is static2-rc mounted
