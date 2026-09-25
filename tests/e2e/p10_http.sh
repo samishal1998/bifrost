@@ -9,7 +9,7 @@
 p10_serve() {
   python3 "$E2E_DIR/inventory.py" 127.0.0.1:18080 "$T/inv.json" >>"$T/inv.log" 2>&1 9>&- &
   P10_PID=$!
-  wait_until 10 curl -s -o /dev/null http://127.0.0.1:18080/
+  wait_until 10 curl -s -m 2 -o /dev/null http://127.0.0.1:18080/
 }
 p10_stop() {
   kill "$P10_PID" 2>/dev/null || true
@@ -50,8 +50,9 @@ p10_pjq() { bifrost --json status | jq -e ".providers[] | select(.name == \"inve
 # p10_mjq ID FILTER : jq FILTER over the MachineDto is true
 p10_mjq() { bifrost --json machines | jq -e --arg id "$1" ".[] | select(.id == \$id) | $2" >/dev/null; }
 p10_no_machine() { bifrost --json machines | jq -e --arg id "$1" 'all(.[]; .id != $id)' >/dev/null; }
-# p10_warned TEXT : a WARN line of d.log contains TEXT (fixed string)
-p10_warned() { grep -F -- "$1" "$T/d.log" | grep -q ' WARN '; }
+# p10_warned TEXT : a WARN line of d.log contains TEXT (fixed string). No pipe: under pipefail a `grep -q` reader
+# makes the writer die of SIGPIPE once d.log holds many matches (every refresh repeats them).
+p10_warned() { awk -v s="$1" 'index($0, s) && / WARN / { f = 1 } END { exit !f }' "$T/d.log"; }
 
 check_p10() {
   local mp=$T/machines/inv-01 allowed='.verdict == "allowed (inventory.filter.include)"'
@@ -68,7 +69,6 @@ check_p10() {
   ok "p10: address-less entry skipped" p10_warned 'machines[1]: skipped: no valid host or address'
   ok "p10: ProxyCommand host warned (A20)" p10_warned 'machines[2]: skipped: invalid host "-oProxyCommand=x"'
   ok "p10: ../x name warned" p10_warned 'machines[3]: skipped: invalid name "../x"'
-  ok "p10: the token never reaches the log" not grep -q "$BF_TOKEN" "$T/d.log"
 
   p10_stop && BF_TOKEN=wrong p10_serve # the daemon's Bearer s3cret is now the wrong token
   ok "p10: wrong token → provider last_error HTTP 401" wait_until 20 p10_pjq '.last_error == "HTTP 401"'
@@ -80,4 +80,6 @@ check_p10() {
   p10_stop && p10_serve
   ok "p10: token restored → provider ok" wait_until 20 p10_pjq '.last_error == null and .machines == 1'
   ok "p10: inv-01 mounted" state_is inv-01 mounted
+  # last: the 401, the failure warn and the server-down transport errors are the likeliest leaks
+  ok "p10: the token never reaches the log" not grep -q "$BF_TOKEN" "$T/d.log"
 }

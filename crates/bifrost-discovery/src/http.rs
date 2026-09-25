@@ -38,13 +38,16 @@ impl HttpProvider {
             v.set_sensitive(true);
             h.insert(n, v); // a configured Accept replaces ours
         }
-        let client = reqwest::Client::builder()
+        let mut b = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none()) // auth headers never follow a redirect elsewhere
             .user_agent(concat!("bifrost/", env!("CARGO_PKG_VERSION")))
-            .default_headers(h)
-            .build()
-            .map_err(|e| e.to_string())?;
+            .default_headers(h);
+        if url.scheme() == "http" {
+            // config allows http:// only to loopback: an env HTTP_PROXY/ALL_PROXY would get the credentials in plaintext
+            b = b.no_proxy();
+        }
+        let client = b.build().map_err(|e| e.to_string())?;
         Ok(Self { name, url, client })
     }
 }
@@ -102,7 +105,7 @@ struct Item {
     name: Option<String>,
     id: Option<String>,
     host: Option<String>,
-    /// a Value: ignored entirely when `host` is present (A20)
+    /// a Value: ignored entirely when `host` is present; otherwise only its first valid entry is kept (A20)
     addresses: Option<Value>,
     port: Option<NonZeroU16>,
     online: Option<bool>,
@@ -144,7 +147,8 @@ pub fn parse_inventory(body: &[u8]) -> Result<Vec<MachineObservation>, Discovery
 }
 
 /// Every field is validated; any invalid one skips the whole entry. The one exception is the contract's:
-/// without `host`, invalid `addresses` are dropped one by one and ≥1 valid one is needed.
+/// without `host`, invalid `addresses` are dropped and the first valid one (within the first 32) is the
+/// only address kept (A20).
 fn observation(i: usize, m: Item) -> Result<MachineObservation, Box<dyn Error>> {
     let native = m.id.as_deref().map(native_id).transpose()?;
     let name = m.name.or(m.id).ok_or("no name and no id")?;
@@ -152,16 +156,31 @@ fn observation(i: usize, m: Item) -> Result<MachineObservation, Box<dyn Error>> 
     let addresses = match (m.host, m.addresses) {
         (Some(h), _) => vec![Host::parse(&h)?], // A20: CIDR rules see exactly the connect target
         (None, Some(Value::Array(a))) => {
-            let mut v = Vec::new();
-            for a in a {
+            // at most 32 read, one warning per entry: an untrusted list can't buy unbounded work or log
+            let (mut v, mut dropped, mut first) = (Vec::new(), 0, None);
+            for a in a.iter().take(32) {
                 match a.as_str().map(Host::parse) {
-                    Some(Ok(h)) => v.push(h),
-                    Some(Err(e)) => warn!(
-                        "machines[{i}]: address dropped: {}",
-                        clean(&e.to_string(), 512)
-                    ),
-                    None => warn!("machines[{i}]: address dropped: not a string"),
+                    Some(Ok(h)) => {
+                        v.push(h);
+                        // A20: CIDR rules must see exactly the connect target (addresses[0]); a trailing
+                        // in-range IP must not carry another first address past include_cidrs
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        dropped += 1;
+                        first.get_or_insert_with(|| e.to_string());
+                    }
+                    None => {
+                        dropped += 1;
+                        first.get_or_insert_with(|| "not a string".to_string());
+                    }
                 }
+            }
+            if let Some(f) = first {
+                warn!(
+                    "machines[{i}]: address dropped: {} ({dropped} in total)",
+                    clean(&f, 512)
+                );
             }
             v
         }
@@ -287,7 +306,7 @@ mod tests {
         ]}));
         assert_eq!(ids(&obs), ["ok-1", "ok-2"]);
         assert_eq!(hosts(&obs[0]), ["10.0.0.1"]);
-        // without "host", invalid addresses are dropped one by one; ≥1 valid one is needed
+        // without "host", invalid addresses are dropped; the first valid one is kept
         assert_eq!(hosts(&obs[1]), ["10.0.0.2"]);
 
         // the body as a whole unusable → Err (the registry freezes the last view)
@@ -358,9 +377,22 @@ mod tests {
         let obs = parse(json!({"machines": [
             {"name": "a", "host": "a.corp.", "addresses": ["10.20.0.4"]},
             {"name": "b", "host": "10.0.0.5", "addresses": "garbage, ignored"},
+            // without host, the first valid address is the connect target, so it is the only one kept
+            {"name": "c", "addresses": ["evil.example", "10.20.0.4"]},
         ]}));
         assert_eq!(hosts(&obs[0]), ["a.corp"]);
         assert_eq!(hosts(&obs[1]), ["10.0.0.5"]);
+        assert_eq!(hosts(&obs[2]), ["evil.example"]);
+
+        // only the first 32 addresses are read: an untrusted list can't buy unbounded work or warnings
+        let mut a = vec![json!(0); 32];
+        a.push(json!("10.0.0.1"));
+        assert!(parse(json!({"machines": [{"name": "d", "addresses": a}]})).is_empty());
+        a.remove(0);
+        assert_eq!(
+            ids(&parse(json!({"machines": [{"name": "d", "addresses": a}]}))),
+            ["d"]
+        );
     }
 
     /// One-shot HTTP/1.1 responder on 127.0.0.1:0: sends `resp` to the first request and yields the request head.
