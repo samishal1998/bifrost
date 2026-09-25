@@ -1,6 +1,6 @@
 //! HTTP API over the Unix socket (contract §8 Routes). `ApiCmd` and `AppState` are frozen (A3); S1-D writes
 //! `router` and the routes.
-#![allow(dead_code)] // S0 stub: nothing constructs these yet; S1-D deletes this line
+#![allow(dead_code)] // router() is unused until S2-E's main.rs serves it; the S2 merge agent deletes this line
 
 use bifrost_core::api::{ActionDto, StatusDto};
 use bifrost_core::events::EventRecord;

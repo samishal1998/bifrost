@@ -47,9 +47,10 @@ impl Machine {
 pub struct MachineRegistry {}
 
 impl MachineRegistry {
-    /// Successful network refresh. Upserts each obs (a duplicate id within `obs`: the first wins, the rest are warned)
-    /// with expires_at = now + max(obs.ttl.unwrap_or(ZERO), floor). Ids this provider reported earlier but not
-    /// now are NOT removed; they age out. Clears `failing`. Returns ids that are new to the registry.
+    /// Successful network refresh. Upserts each obs (a duplicate id within `obs`: the first wins, the rest are
+    /// dropped; providers already warn, §7) with expires_at = now + max(obs.ttl.unwrap_or(ZERO), floor). Ids this
+    /// provider reported earlier but not now are NOT removed; they age out. Clears `failing`. Returns ids that are
+    /// new to the registry.
     pub fn apply_ok(
         &mut self,
         _src: &Source,

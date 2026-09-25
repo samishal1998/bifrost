@@ -204,8 +204,9 @@ pub type MachineId = Name;
 pub type MountId = Name;            // == directory name under mount.root
 impl Name { pub fn parse(s: &str) -> Result<Self, Invalid>; pub fn as_str(&self) -> &str; }
 
-/// Either a std `IpAddr` literal (no brackets, no zone id), or a hostname: one trailing '.' stripped,
-/// ≤253 bytes, labels 1..=63 of [A-Za-z0-9_-], no label starting with '-'. Stored lowercase.
+/// Either a std `IpAddr` literal (no brackets, no zone id, not unspecified), or a hostname: one trailing '.'
+/// stripped, ≤253 bytes, labels 1..=63 of [A-Za-z0-9_-], no label starting with '-'. Stored lowercase.
+/// IP literals are stored canonical (v4-mapped v6 → v4, v6 compressed), so a v4 cidr can't be dodged.
 /// ⇒ never starts with '-'; never contains whitespace, '"', '\'', ',', '@', '/', '=', '%', or ':'
 ///   (':' only inside a v6 literal).
 pub struct Host(String);
@@ -233,21 +234,24 @@ impl RemotePath {
 pub fn tag(s: &str) -> Result<String, Invalid>;       // lowercased; ^[a-z0-9][a-z0-9_.:-]{0,62}$
 pub fn meta_key(s: &str) -> Result<String, Invalid>;  // ^[a-z0-9_.-]{1,64}$
 pub fn native_id(s: &str) -> Result<String, Invalid>; // ^[A-Za-z0-9._:-]{1,128}$
-/// Display-only text: control chars → '?', truncated at `max` chars. Callers pass 128 for display names,
-/// 256 for metadata values (the config rule) and 512 for errors and log lines (A8).
+/// Display-only text: control chars and bidi/zero-width format chars → '?', truncated at `max` chars.
+/// Callers pass 128 for display names, 256 for metadata values (the config rule) and 512 for errors and
+/// log lines (A8).
 pub fn clean(s: &str, max: usize) -> String;
 /// First line of every driver log (§6 spawn): `LOG_HEADER` + the argv.
 pub const LOG_HEADER: &str = "# bifrost exec: ";
-/// Error text from a log or stderr: split on '\n' (trailing '\r' trimmed), skip empty lines and lines starting
-/// with LOG_HEADER, keep the LAST lines that fit in `max` chars, each clean(line, max)ed, joined with " | " (A8).
+/// Error text from a log or stderr: split on '\n' (trailing '\r' trimmed), skip blank (whitespace-only) lines
+/// and lines starting with LOG_HEADER, keep the LAST lines that fit in `max` chars, each clean(line, max)ed,
+/// joined with " | " (A8).
 pub fn tail(s: &str, max: usize) -> String;
-pub fn parse_duration(s: &str) -> Result<std::time::Duration, Invalid>; // ^[0-9]+(ms|s|m|h)$, >0, checked overflow
+pub fn parse_duration(s: &str) -> Result<std::time::Duration, Invalid>; // ^[0-9]+(ms|s|m|h)$, > 0, ≤ 366d (so Instant + 3·d can't overflow), checked overflow
 
 /// `[a-z0-9*?._-]{1,63}`; '*' = any run, '?' = one char; iterative two-pointer matcher.
 #[derive(Clone, Debug, PartialEq, Eq)] pub struct Glob(String);
 impl Glob { pub fn parse(s: &str) -> Result<Self, Invalid>; pub fn matches(&self, s: &str) -> bool; }
 
 /// "10.0.0.0/8" | "fd7a::/48" | bare IP (= /32 or /128). Address families never cross-match.
+/// IPv4-mapped v6 is rejected (write the v4 form): Host stores it as v4, so it could never match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub struct Cidr { pub addr: std::net::IpAddr, pub prefix: u8 }
 impl Cidr { pub fn parse(s: &str) -> Result<Self, Invalid>; pub fn contains(&self, ip: std::net::IpAddr) -> bool; }
 
@@ -385,9 +389,10 @@ impl Machine {
 #[derive(Default)]
 pub struct MachineRegistry { /* BTreeMap<MachineId, BTreeMap<Source, (MachineObservation, Option<Instant>)>>, failing: BTreeSet<String> */ }
 impl MachineRegistry {
-    /// Successful network refresh. Upserts each obs (a duplicate id within `obs`: the first wins, the rest are warned)
-    /// with expires_at = now + max(obs.ttl.unwrap_or(ZERO), floor). Ids this provider reported earlier but not
-    /// now are NOT removed; they age out. Clears `failing`. Returns ids that are new to the registry.
+    /// Successful network refresh. Upserts each obs (a duplicate id within `obs`: the first wins, the rest are
+    /// dropped; providers already warn, §7) with expires_at = now + max(obs.ttl.unwrap_or(ZERO), floor). Ids this
+    /// provider reported earlier but not now are NOT removed; they age out. Clears `failing`. Returns ids that are
+    /// new to the registry.
     pub fn apply_ok(&mut self, src: &Source, obs: Vec<MachineObservation>, now: Instant, floor: Duration) -> Vec<MachineId>;
     /// Failed refresh: expire() skips this provider until its next apply_ok (freeze, not drop).
     pub fn mark_failed(&mut self, provider: &str);
@@ -1559,13 +1564,13 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
 
 - **core::validate** (S0):
   - `name_rejects_traversal` (`""`, `.`, `..`, `a/b`, `../x`, `.x`, `-x`, `a b`, `a\0`, 64 chars), `name_lowercases`;
-  - `host_rejects_option_injection` (`-oProxyCommand=x`, `a b`, `a,b`, `a"b`, `u@h`, `h:22`, `h;rm`, `fe80::1%eth0`, 254 chars);
+  - `host_rejects_option_injection` (`-oProxyCommand=x`, `a b`, `a,b`, `a"b`, `u@h`, `h:22`, `h;rm`, `fe80::1%eth0`, 254 chars, unspecified `0.0.0.0`/`::`/`0.0.0.0.`);
   - `host_accepts_ipv4_ipv6_fqdn_trailing_dot`, `host_for_colon_brackets_v6`;
   - `user_rejects_dash_at_space`;
   - `remote_path_rules` (`~`, `~/x`, `/`, `/a b` ok; `a/b`, `/a/../b`, `/a\nb`, `/a:b`, `""` rejected), `sftp_path_mapping` (including `sftp_path("/") == "/"`, B2);
-  - `tag_meta_label_native_id_grammars` (tag, meta_key, native_id; `dns_label` now lives in discovery, B8), `clean_strips_escapes` (with `max`), `tail_skips_header` (keeps the last lines within `max`, skips `LOG_HEADER` lines, A8);
-  - `duration_units_rejects_zero_and_junk` (`500ms`, `30s`, `5m`, `1h` ok; `5`, `5 m`, `-1s`, `1d` rejected);
-  - `glob_star_question`, `cidr_v4_v6_no_cross_family`, `fnv64_known_vectors`;
+  - `tag_meta_label_native_id_grammars` (tag, meta_key, native_id; `dns_label` now lives in discovery, B8), `clean_strips_escapes` (with `max`; bidi/zero-width → `?`), `tail_skips_header` (keeps the last lines within `max`, skips `LOG_HEADER` lines, A8);
+  - `duration_units_rejects_zero_and_junk` (`500ms`, `30s`, `5m`, `1h` ok; `5`, `5 m`, `-1s`, `1d`, `8785h` (> 366d) rejected);
+  - `glob_star_question`, `cidr_v4_v6_no_cross_family` (v4-mapped v6 rejected), `fnv64_known_vectors`;
   - `backoff_bounds` (failures 0..=64 × rand ∈ {0, u64::MAX}: within [base/2, base] and ≤ max; 0 behaves like 1, C3), `backoff_no_overflow`.
 - **core::model** (S0, A2): `fingerprint_changes_on_every_field`, `fingerprint_stable_vector` (a hard-coded expected hex), `marker_roundtrip_exact` (`agent-01` vs `agent-01-home`), `source_format`, `driver_selector_serde_rejects_bad_grammar` (grammar only, B8), `serde_newtypes_validate_on_deserialize`.
 - **core::policy:** `deny_wins_over_allow`, `global_deny_beats_static`, `provider_exclude_drops_only_that_observation`, `no_allow_rule_is_discover_only`, `static_allowed_by_default`, `include_kinds_anded_values_ored`, `include_metadata_all_pairs_deny_metadata_any`, `cidr_deny_fails_closed_without_ip`, `cidr_deny_static_hostname_not_matched`, `cidr_allow_requires_ip`, `providers_matches_name_or_kind`, **`global_ids_match_machine_id_only`**, **`native_id_scoped_to_owning_provider`** (A19: a DNS/HTTP record publishing `id=<a tailscale node ID>` doesn't satisfy a global `allow ids=[…]`).

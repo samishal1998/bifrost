@@ -34,6 +34,7 @@ fn build_provider(pc: &ProviderConfig) -> Result<Arc<dyn DiscoveryProvider>, Str
     })
 }
 
+// ponytail: bifrostd and bifrost-discovery are never darwin-checked (reqwest pulls ring, whose C build needs an Apple toolchain; B9); upgrade: a macOS runner, or retry SDKROOT=/ CC_aarch64_apple_darwin=true AR_aarch64_apple_darwin=true cargo check --target aarch64-apple-darwin --workspace
 fn main() {
     let _deps = Deps {
         drivers: Arc::new(|s: &DriverSettings| bifrost_mount::drivers(s)),

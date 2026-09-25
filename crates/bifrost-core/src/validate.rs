@@ -59,8 +59,9 @@ impl Name {
     }
 }
 
-/// Either a std `IpAddr` literal (no brackets, no zone id), or a hostname: one trailing '.' stripped,
-/// ≤253 bytes, labels 1..=63 of [A-Za-z0-9_-], no label starting with '-'. Stored lowercase.
+/// Either a std `IpAddr` literal (no brackets, no zone id, not unspecified), or a hostname: one trailing '.'
+/// stripped, ≤253 bytes, labels 1..=63 of [A-Za-z0-9_-], no label starting with '-'. Stored lowercase.
+/// IP literals are stored canonical (v4-mapped v6 → v4, v6 compressed), so a v4 cidr can't be dodged.
 /// ⇒ never starts with '-'; never contains whitespace, '"', '\'', ',', '@', '/', '=', '%', or ':'
 ///   (':' only inside a v6 literal).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -69,11 +70,19 @@ pub struct Host(String);
 
 impl Host {
     pub fn parse(s: &str) -> Result<Self, Invalid> {
-        if let Ok(ip) = s.parse::<IpAddr>() {
+        let h = s.strip_suffix('.').unwrap_or(s); // before the IP parse, so "0.0.0.0." can't dodge the check
+        if let Ok(ip) = h.parse::<IpAddr>() {
             // canonical + lowercase; ::ffff:a.b.c.d is stored as a.b.c.d so a v4 cidr deny can't be dodged
-            return Ok(Self(ip.to_canonical().to_string()));
+            let ip = ip.to_canonical();
+            if ip.is_unspecified() {
+                return Err(bad(
+                    "host",
+                    s,
+                    "unspecified address (connects to this machine)",
+                ));
+            }
+            return Ok(Self(ip.to_string()));
         }
-        let h = s.strip_suffix('.').unwrap_or(s);
         let label = |l: &str| {
             gram(
                 l,
@@ -208,19 +217,24 @@ pub fn native_id(s: &str) -> Result<String, Invalid> {
         .then(|| s.to_string())
         .ok_or_else(|| bad("native id", s, "must match [A-Za-z0-9._:-]{1,128}"))
 }
-/// Display-only text: control chars → '?', truncated at `max` chars. Callers pass 128 for display names,
-/// 256 for metadata values (the config rule) and 512 for errors and log lines (A8).
+/// Display-only text: control chars and bidi/zero-width format chars → '?', truncated at `max` chars.
+/// Callers pass 128 for display names, 256 for metadata values (the config rule) and 512 for errors and
+/// log lines (A8).
 /// `is_control` also covers C1 (0x80–0x9f, incl. the 8-bit CSI 0x9b).
 pub fn clean(s: &str, max: usize) -> String {
     s.chars()
         .take(max)
-        .map(|c| if c.is_control() { '?' } else { c })
+        .map(|c| {
+            let fmt = matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}');
+            if c.is_control() || fmt { '?' } else { c }
+        })
         .collect()
 }
 /// First line of every driver log (§6 spawn): `LOG_HEADER` + the argv.
 pub const LOG_HEADER: &str = "# bifrost exec: ";
-/// Error text from a log or stderr: split on '\n' (trailing '\r' trimmed), skip empty lines and lines starting
-/// with LOG_HEADER, keep the LAST lines that fit in `max` chars, each clean(line, max)ed, joined with " | " (A8).
+/// Error text from a log or stderr: split on '\n' (trailing '\r' trimmed), skip blank (whitespace-only) lines
+/// and lines starting with LOG_HEADER, keep the LAST lines that fit in `max` chars, each clean(line, max)ed,
+/// joined with " | " (A8).
 pub fn tail(s: &str, max: usize) -> String {
     let mut kept = Vec::new();
     let mut len = 0;
@@ -240,7 +254,7 @@ pub fn tail(s: &str, max: usize) -> String {
     kept.reverse();
     kept.join(" | ")
 }
-/// `^[0-9]+(ms|s|m|h)$`, >0, checked overflow
+/// `^[0-9]+(ms|s|m|h)$`, > 0, ≤ 366d (so `Instant + 3·d` can't overflow), checked overflow
 pub fn parse_duration(s: &str) -> Result<Duration, Invalid> {
     let i = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num, unit) = s.split_at(i); // num is all digits, so u64::from_str never sees a '+'
@@ -252,8 +266,8 @@ pub fn parse_duration(s: &str) -> Result<Duration, Invalid> {
         "h" => n.and_then(|n| n.checked_mul(3600)).map(Duration::from_secs),
         _ => None,
     };
-    d.filter(|d| !d.is_zero())
-        .ok_or_else(|| bad("duration", s, "must be <n>ms|s|m|h, > 0"))
+    d.filter(|d| !d.is_zero() && *d <= Duration::from_secs(366 * 86_400))
+        .ok_or_else(|| bad("duration", s, "must be <n>ms|s|m|h, > 0 and <= 366d"))
 }
 
 // ponytail: hand-rolled glob (*, ?), CIDR, duration, FNV-1a and jitter; no character classes or brace globs, durations use a single unit; globset if rules need classes
@@ -299,6 +313,7 @@ impl Glob {
 }
 
 /// "10.0.0.0/8" | "fd7a::/48" | bare IP (= /32 or /128). Address families never cross-match.
+/// IPv4-mapped v6 is rejected (write the v4 form): Host stores it as v4, so it could never match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
     pub addr: IpAddr,
@@ -312,6 +327,9 @@ impl Cidr {
             None => (s, None),
         };
         let addr: IpAddr = a.parse().map_err(|_| bad("cidr", s, "not an IP address"))?;
+        if matches!(addr, IpAddr::V6(v) if v.to_ipv4_mapped().is_some()) {
+            return Err(bad("cidr", s, "IPv4-mapped: write the IPv4 form"));
+        }
         let full = if addr.is_ipv4() { 32 } else { 128 };
         let prefix = match p {
             None => full,
@@ -406,6 +424,10 @@ mod tests {
             "a=b",
             "a'b",
             "x.-y",
+            "0.0.0.0",
+            "::",
+            "::ffff:0.0.0.0",
+            "0.0.0.0.",
         ] {
             assert!(Host::parse(s).is_err(), "{s:?}");
         }
@@ -421,6 +443,7 @@ mod tests {
         assert_eq!(h("FD7A:115C::1").as_str(), "fd7a:115c::1");
         assert!(h("::1").ip().is_some());
         assert_eq!(h("::ffff:10.1.2.3").as_str(), "10.1.2.3");
+        assert_eq!(h("10.0.0.1.").as_str(), "10.0.0.1");
         assert_eq!(
             h("Agent-01.tail1234.TS.net.").as_str(),
             "agent-01.tail1234.ts.net"
@@ -500,6 +523,11 @@ mod tests {
         assert_eq!(clean("a\nb\rc\td\u{9b}e\u{7f}", 512), "a?b?c?d?e?");
         assert_eq!(clean("héllo", 3), "hél");
         assert_eq!(clean("abc", 0), "");
+        assert_eq!(
+            clean("a\u{202e}b\u{200b}c\u{2066}d\u{feff}e\u{2028}f", 512),
+            "a?b?c?d?e?f"
+        );
+        assert_eq!(clean("héllo ✓ 日本", 512), "héllo ✓ 日本");
     }
 
     #[test]
@@ -525,7 +553,7 @@ mod tests {
         assert_eq!(d("30s"), Duration::from_secs(30));
         assert_eq!(d("5m"), Duration::from_secs(300));
         assert_eq!(d("1h"), Duration::from_secs(3600));
-        assert_eq!(d("18446744073709551615s"), Duration::from_secs(u64::MAX));
+        assert_eq!(d("8784h"), Duration::from_secs(366 * 86_400));
         for s in [
             "5",
             "5 m",
@@ -542,6 +570,9 @@ mod tests {
             "5S",
             "18446744073709551615h",
             "99999999999999999999s",
+            "8785h",
+            "31622400001ms",
+            "18446744073709551615s",
         ] {
             assert!(parse_duration(s).is_err(), "{s:?}");
         }
@@ -587,6 +618,9 @@ mod tests {
             "host/8",
             "",
             "10.0.0.0/8/9",
+            "::ffff:0:0/96",
+            "::ffff:10.0.0.0/104",
+            "::ffff:10.1.2.3",
         ] {
             assert!(Cidr::parse(s).is_err(), "{s:?}");
         }
