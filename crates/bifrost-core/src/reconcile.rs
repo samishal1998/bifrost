@@ -576,11 +576,14 @@ pub fn plan(i: &PlanInput) -> Vec<(MountId, Action)> {
 
 /// Earliest deadline a pass may act on: `mount_retry_at` while Absent (row 8); while Mounted, `unmount_retry_at`
 /// (⊳U gates every Mounted row that acts, row 12 included), else `degraded_since + grace` when Degraded (row 12).
-/// ponytail: no `now` in the frozen signature, so a deadline that passed without its row acting is still returned
-/// (Absent but offline or without a driver; Degraded past grace while not desired in warm-up; a no-longer-wanted
-/// unmount retry until the next health probe drops it). The caller must keep only deadlines > now and must not
-/// sleep until an instant ≤ now in a loop; upgrade: take `now` and filter here.
-pub fn next_wakeup(runtimes: &BTreeMap<MountId, MountRuntime>, grace: Duration) -> Option<Instant> {
+/// Only deadlines strictly after `now` count: one that passed without its row acting (Absent but offline or without a
+/// driver; Degraded past grace while not desired in warm-up; a no-longer-wanted unmount retry) must not make the actor
+/// spin.
+pub fn next_wakeup(
+    runtimes: &BTreeMap<MountId, MountRuntime>,
+    grace: Duration,
+    now: Instant,
+) -> Option<Instant> {
     (runtimes.values())
         .flat_map(|rt| match rt.phase {
             Phase::Absent => rt.mount_retry_at,
@@ -591,6 +594,7 @@ pub fn next_wakeup(runtimes: &BTreeMap<MountId, MountRuntime>, grace: Duration) 
             }),
             Phase::Mounting | Phase::Unmounting => None,
         })
+        .filter(|t| *t > now)
         .min()
 }
 
@@ -1572,7 +1576,7 @@ mod tests {
             (None, None)
         );
         assert_eq!(
-            next_wakeup(&BTreeMap::from([(id("a"), rt.clone())]), GRACE),
+            next_wakeup(&BTreeMap::from([(id("a"), rt.clone())]), GRACE, now),
             None
         );
         // a busy unmount that later succeeds leaves no stale error behind (would read Failed while Absent)
@@ -1869,20 +1873,25 @@ mod tests {
             (id("c"), grace),
             (id("d"), inflight),
         ]);
-        assert_eq!(next_wakeup(&rts, GRACE), Some(now + secs(15)));
+        assert_eq!(next_wakeup(&rts, GRACE, now), Some(now + secs(15)));
+        // passed deadlines are ignored, so the actor never sleeps until an instant <= now
+        assert_eq!(
+            next_wakeup(&rts, GRACE, now + secs(16)),
+            Some(now + secs(20))
+        );
         rts.remove(&id("c"));
-        assert_eq!(next_wakeup(&rts, GRACE), Some(now + secs(20)));
+        assert_eq!(next_wakeup(&rts, GRACE, now), Some(now + secs(20)));
         rts.remove(&id("b"));
-        assert_eq!(next_wakeup(&rts, GRACE), Some(now + secs(30)));
+        assert_eq!(next_wakeup(&rts, GRACE, now), Some(now + secs(30)));
         rts.remove(&id("a"));
-        assert_eq!(next_wakeup(&rts, GRACE), None);
+        assert_eq!(next_wakeup(&rts, GRACE, now), None);
         // past grace but row 12 waits out ⊳U: wake at the unmount retry, not the passed grace deadline
         let held_back = MountRuntime {
             unmount_retry_at: Some(now + secs(9)),
             ..degraded(&c, now - GRACE - secs(5))
         };
         let rts = BTreeMap::from([(id("e"), held_back)]);
-        assert_eq!(next_wakeup(&rts, GRACE), Some(now + secs(9)));
+        assert_eq!(next_wakeup(&rts, GRACE, now), Some(now + secs(9)));
     }
 
     #[test]

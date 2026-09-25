@@ -476,7 +476,7 @@ pub struct PlanInput<'a> { pub now: Instant, pub ready: bool, pub grace: Duratio
     pub candidates: &'a BTreeMap<MountId, Candidate>, pub runtimes: &'a BTreeMap<MountId, MountRuntime> }
 pub fn decide(c: Option<&Candidate>, rt: &MountRuntime, now: Instant, ready: bool, grace: Duration) -> Action; // §5 table
 pub fn plan(i: &PlanInput) -> Vec<(MountId, Action)>;            // ids = candidates ∪ runtimes, sorted; pure
-pub fn next_wakeup(runtimes: &BTreeMap<MountId, MountRuntime>, grace: Duration) -> Option<Instant>;
+pub fn next_wakeup(runtimes: &BTreeMap<MountId, MountRuntime>, grace: Duration, now: Instant) -> Option<Instant>; // only deadlines > now (S1 sign-off)
 
 /// PRD §12 states. Ord == display severity (used when aggregating a machine's mounts).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1832,3 +1832,27 @@ These refine the rows above. Where a verbatim row's wording differs, this list w
 - **E5:** `StatusDto.auto_driver` (the daemon's `select_driver(&Auto, …)`) is the one source for the default shown by status, doctor, `drivers` and the TUI; S2-F owns the status, doctor and `drivers` printing. The per-driver `auto_rank` stays cut.
 - **C7:** S2-G writes both complete `run.sh` lists; a listed phase file that doesn't exist yet is skipped. S3 and S4 agents never edit `run.sh`.
 - **A8:** `clean` caps are 128 for names, 256 for metadata values and 512 for errors and log lines.
+
+## Orchestrator sign-offs (after S1)
+
+These are binding for S2 onward and win over earlier text where they differ.
+
+1. `reconcile::next_wakeup(runtimes, grace, now)` takes `now` and returns only deadlines strictly after it. The actor never sleeps until an instant ≤ now.
+2. `MountRuntime` stores no id, so `mount_done(Err)` returns `MountFailed` with an empty `mount`. **The actor stamps the id it keys the runtime by into every event before publishing it.**
+3. `SshfsDriver { s: DriverSettings }` (private field) is accepted. It mirrors `RcloneDriver { nfs }`.
+4. **Verified on this host** (sshfs 3.7.3 / fuse3 3.14.0 / OpenSSH 9.6):
+   - the ssh `-s sftp` preflight exits 0 against a working server, so it stays;
+   - a user `-o fsname=bifrost:<id>@<fp>` IS the fuse.sshfs mountinfo source, so the A10 fallback is not used;
+   - after `kill -9 sshfs`, `auto_unmount` does NOT unmount. The mount stays and returns ENOTCONN, so recovery is Stale → row 10 (lazy detach) → row 9, driven by the health tick. p06's 20s budget relies on the E2E `health_interval = 2s`;
+   - `fusermount3 -u` on a busy mount prints "Device or resource busy" and exits 1. On a path that isn't mounted it prints "entry for … not found" and exits 1.
+5. `crates/bifrost-cli/tests/config_check.rs` (created by S1-B) is owned by S2-F from S2 on.
+6. These S1-B choices are accepted:
+   - `ConfigError.path` is the key path for semantic errors, `<file>:<line>:<col>` for TOML syntax/shape errors, and the file path for an unreadable file;
+   - every duration is ≥ 1s;
+   - `config check --json` prints `ReloadDto`;
+   - `config check` reports on stdout;
+   - `parse()` makes a single `Path::exists()` call for `ssh_config`;
+   - `load()` on a missing file is Err, and the daemon decides the fallback (§8 step 4).
+7. The S1-A Display strings for verdicts, actions, wait reasons and `Reason` are final. S2-F golden tests lock them in.
+8. A graceful held unmount of an **adopted** mount that has no candidate waits for `ready`; `--force` still goes through row 3. Accepted.
+9. `api.rs` keeps `#![allow(dead_code)]` until S2-E's `main.rs` serves `router()`. The S2 merge agent deletes that line, and the ones in `actor.rs`, once they are no longer needed.
