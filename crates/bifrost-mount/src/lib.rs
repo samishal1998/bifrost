@@ -55,6 +55,24 @@ pub enum Flavor {
     FuseT,
 }
 
+/// Linux, or the macOS FUSE flavour (None: neither macFUSE nor FUSE-T).
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn flavor() -> Option<Flavor> {
+    Some(Flavor::Linux)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn flavor() -> Option<Flavor> {
+    let is = |p: &str| Path::new(p).exists();
+    if is("/Library/Filesystems/macfuse.fs") {
+        Some(Flavor::MacFuse)
+    } else if is("/Library/Application Support/fuse-t") || is("/usr/local/lib/libfuse-t.dylib") {
+        Some(Flavor::FuseT)
+    } else {
+        None
+    }
+}
+
 /// pure
 pub fn preflight_argv(spec: &MountSpec, ssh_config: Option<&Path>) -> Vec<OsString> {
     let mut a: Vec<OsString> = SSH_OPTS
@@ -432,6 +450,54 @@ pub(crate) mod tests {
             "/home/bf",
             false,
         )
+    }
+
+    // ---- #[ignore] docker helpers: BIFROST_E2E_SSH=host:port:user:ssh_config (tests/e2e/lib.sh start_sshd) ----
+
+    /// A spec for the docker sshd (`host` overrides its host), mounted under a fresh root that is also the
+    /// settings' state dir. The root is not a Tmp: a leftover mount must never meet remove_dir_all.
+    pub(crate) fn e2e(id: &str, host: Option<&str>) -> (MountSpec, DriverSettings, PathBuf) {
+        let v = std::env::var("BIFROST_E2E_SSH").unwrap_or_default();
+        let [h, port, user, cfg] = v.splitn(4, ':').collect::<Vec<_>>()[..] else {
+            panic!("BIFROST_E2E_SSH=host:port:user:ssh_config")
+        };
+        let root = fresh_dir(&format!("e2e-{id}")).canonicalize().unwrap();
+        let port = Some(port.parse().unwrap());
+        let mut s = spec(id, host.unwrap_or(h), port, Some(user), "/home/bf", false);
+        s.local_path = root.join(id);
+        let set = DriverSettings {
+            ssh_config: Some(cfg.into()),
+            vfs_cache_mode: "writes".into(),
+            mount_timeout: Duration::from_secs(20),
+            state_dir: root.clone(),
+        };
+        (s, set, root)
+    }
+
+    pub(crate) fn req(
+        s: &MountSpec,
+        root: &Path,
+    ) -> (MountRequest, std::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let r = MountRequest {
+            spec: s.clone(),
+            log_path: root.join(format!("{}.log", s.id.as_str())),
+            on_exit: Box::new(move |d| tx.send(d).unwrap()),
+        };
+        (r, rx)
+    }
+
+    /// Non-recursive on purpose: it fails rather than ever deleting through a mount.
+    pub(crate) fn tidy(root: &Path) {
+        for e in std::fs::read_dir(root).unwrap() {
+            let p = e.unwrap().path();
+            let _ = std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir(&p));
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    pub(crate) fn in_table(p: &Path) -> Option<MountEntry> {
+        table::find(&table::read().unwrap(), p).cloned()
     }
 
     fn os(v: &[&str]) -> Vec<OsString> {

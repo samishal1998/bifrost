@@ -3,7 +3,7 @@
 //! OpenSSH, with the same SSH_OPTS, ssh_config and known_hosts as sshfs. Spawn, readiness, inspect and
 //! unmount are the shared lib.rs code.
 
-use crate::{DriverSettings, Flavor, SSH_OPTS, check};
+use crate::{DriverSettings, Flavor, SSH_OPTS, check, flavor};
 use bifrost_core::{
     BoxFuture, DriverAvailability, MountDriver, MountError, MountHandle, MountRequest, MountSpec,
     MountState, marker,
@@ -93,24 +93,6 @@ pub(crate) fn sftp_ssh_check(
             "--sftp-ssh: whitespace, '\"' or a control character in the ssh, ssh_config, host or user".into(),
         )
     })
-}
-
-/// Linux, or the macOS FUSE flavour (None: neither macFUSE nor FUSE-T). The same check is private in sshfs.rs.
-#[cfg(not(target_os = "macos"))]
-fn flavor() -> Option<Flavor> {
-    Some(Flavor::Linux)
-}
-
-#[cfg(target_os = "macos")]
-fn flavor() -> Option<Flavor> {
-    let is = |p: &str| Path::new(p).exists();
-    if is("/Library/Filesystems/macfuse.fs") {
-        Some(Flavor::MacFuse)
-    } else if is("/Library/Application Support/fuse-t") || is("/usr/local/lib/libfuse-t.dylib") {
-        Some(Flavor::FuseT)
-    } else {
-        None
-    }
 }
 
 /// stdout + stderr of `rclone <args>` (5s).
@@ -236,7 +218,7 @@ pub fn rclone_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{Tmp, fresh_dir, spec, static1, tmpdir};
+    use crate::tests::{Tmp, e2e, in_table, req, spec, static1, tidy, tmpdir};
     use bifrost_core::{DriverSelector, marker};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -581,55 +563,17 @@ esac"#,
     }
 
     // ---- #[ignore] docker tests: BIFROST_E2E_SSH=host:port:user:ssh_config (tests/e2e/lib.sh start_sshd) ----
-    // sshfs.rs's docker helpers are private to its test module; these are the rclone copies.
-
-    /// The docker sshd as (driver, spec, mount root, state dir). The root is not a Tmp: a leftover mount must
-    /// never meet remove_dir_all. The state dir is (rclone nests its cache there; nothing is mounted in it).
-    fn e2e(id: &str) -> (RcloneDriver, MountSpec, PathBuf, Tmp) {
-        let v = std::env::var("BIFROST_E2E_SSH").unwrap_or_default();
-        let [host, port, user, cfg] = v.splitn(4, ':').collect::<Vec<_>>()[..] else {
-            panic!("BIFROST_E2E_SSH=host:port:user:ssh_config")
-        };
-        let root = fresh_dir(&format!("e2e-{id}")).canonicalize().unwrap();
-        let mut s = spec(
-            id,
-            host,
-            Some(port.parse().unwrap()),
-            Some(user),
-            "/home/bf",
-            false,
-        );
+    /// The shared docker spec as an rclone mount, with its own state dir (rclone nests its cache there; nothing
+    /// is mounted in it, so it can be a Tmp).
+    fn rclone_e2e(id: &str) -> (RcloneDriver, MountSpec, PathBuf, Tmp) {
+        let (mut s, set, root) = e2e(id, None);
         s.driver = DriverSelector::Named("rclone".into());
-        s.local_path = root.join(id);
         let state = tmpdir(&format!("e2e-{id}-state"));
         let set = DriverSettings {
-            ssh_config: Some(cfg.into()),
-            ..settings(&state)
+            state_dir: state.to_path_buf(),
+            ..set
         };
         (RcloneDriver::new(set, false), s, root, state)
-    }
-
-    fn req(s: &MountSpec, root: &Path) -> (MountRequest, std::sync::mpsc::Receiver<String>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let r = MountRequest {
-            spec: s.clone(),
-            log_path: root.join(format!("{}.log", s.id.as_str())),
-            on_exit: Box::new(move |d| tx.send(d).unwrap()),
-        };
-        (r, rx)
-    }
-
-    /// Non-recursive on purpose: it fails rather than ever deleting through a mount.
-    fn tidy(root: &Path) {
-        for e in std::fs::read_dir(root).unwrap() {
-            let p = e.unwrap().path();
-            let _ = std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir(&p));
-        }
-        std::fs::remove_dir(root).unwrap();
-    }
-
-    fn in_table(p: &Path) -> Option<crate::table::MountEntry> {
-        crate::table::find(&crate::table::read().unwrap(), p).cloned()
     }
 
     async fn on_exit(rx: std::sync::mpsc::Receiver<String>) -> String {
@@ -671,7 +615,7 @@ esac"#,
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs docker sshd: BIFROST_E2E_SSH"]
     async fn rclone_mount_write_roundtrip() {
-        let (d, s, root, state) = e2e("rc1");
+        let (d, s, root, state) = rclone_e2e("rc1");
         assert!(matches!(
             d.probe().await,
             DriverAvailability::Available { .. }
@@ -736,7 +680,7 @@ esac"#,
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs docker sshd: BIFROST_E2E_SSH"]
     async fn rclone_kill9_stale_then_lazy() {
-        let (d, s, root, _state) = e2e("rck9");
+        let (d, s, root, _state) = rclone_e2e("rck9");
         let (r, rx) = req(&s, &root);
         let h = d.mount(r).await.unwrap();
         assert_eq!(d.inspect(&h).await, MountState::Healthy);

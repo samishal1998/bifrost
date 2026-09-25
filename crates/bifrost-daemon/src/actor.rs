@@ -252,7 +252,12 @@ async fn discover_loop(
     tx: mpsc::UnboundedSender<Msg>,
 ) {
     loop {
-        let result = (tokio::time::timeout(Duration::from_secs(30), p.discover()).await)
+        let discover = caught(
+            "provider",
+            || p.discover(),
+            |e| Err(DiscoveryError::Failed(e)),
+        );
+        let result = (tokio::time::timeout(Duration::from_secs(30), discover).await)
             .unwrap_or_else(|_| Err(DiscoveryError::Failed("timed out after 30s".into())));
         let provider = provider.clone();
         let msg = Msg::Discovery {
@@ -268,6 +273,26 @@ async fn discover_loop(
             _ = notify.notified() => {}
         }
     }
+}
+
+/// Runs a driver or provider call. A panic in it, at call or at poll time, becomes `on_panic("<what> panicked:
+/// <message>")` instead of killing the task, so the message the actor waits for is always sent and no runtime
+/// stays in flight (S3 sign-off 2a).
+async fn caught<T, F: Future<Output = T>>(
+    what: &str,
+    call: impl FnOnce() -> F,
+    on_panic: impl FnOnce(String) -> T,
+) -> T {
+    use futures_util::FutureExt;
+    let lazy = std::panic::AssertUnwindSafe(async move { call().await });
+    lazy.catch_unwind().await.unwrap_or_else(|p| {
+        let msg = (p.downcast_ref::<&str>().map(|s| s.to_string()))
+            .or_else(|| p.downcast_ref::<String>().cloned());
+        on_panic(format!(
+            "{what} panicked: {}",
+            clean(&msg.unwrap_or_default(), 512)
+        ))
+    })
 }
 
 /// Sign-off 2: MountRuntime stores no id, so the actor stamps the id it keys the runtime by into every event.
@@ -304,7 +329,8 @@ impl Actor {
                 () = sleep_until(self.deadline()) => None,
                 Some(r) = self.execs.join_next() => {
                     if let Err(e) = r {
-                        warn!("executor task failed: {e}"); // its runtime stays in flight
+                        // driver panics are caught inside the task and reported as MountDone/UnmountDone Err
+                        warn!("executor task failed: {e}");
                     }
                     continue;
                 }
@@ -620,7 +646,10 @@ impl Actor {
     fn probe(&self) {
         let (drivers, tx) = (self.drivers.clone(), self.tx.clone());
         tokio::spawn(async move {
-            let each = (drivers.iter()).map(|(n, d)| async move { (n.clone(), d.probe().await) });
+            let each = (drivers.iter()).map(|(n, d)| async move {
+                let unavailable = DriverAvailability::Unavailable;
+                (n.clone(), caught("driver", || d.probe(), unavailable).await)
+            });
             let probes = futures_util::future::join_all(each).await;
             let _ = tx.send(Msg::Probed(probes.into_iter().collect()));
         });
@@ -842,7 +871,8 @@ impl Actor {
         let limit = self.cfg.timings.mount_timeout + Duration::from_secs(60);
         let id = id.clone();
         let op = async move {
-            let result = (tokio::time::timeout(limit, d.mount(req)).await).unwrap_or_else(|_| {
+            let mount = caught("driver", || d.mount(req), |e| Err(MountError::Failed(e)));
+            let result = (tokio::time::timeout(limit, mount).await).unwrap_or_else(|_| {
                 Err(MountError::Failed(format!(
                     "timed out after {}s",
                     limit.as_secs()
@@ -882,6 +912,7 @@ impl Actor {
                     None => bifrost_mount::unmount_path(&h.local_path, force).await,
                 }
             };
+            let unmount = caught("driver", || unmount, |e| Err(MountError::Failed(e)));
             let result = (tokio::time::timeout(Duration::from_secs(30), unmount).await)
                 .unwrap_or_else(|_| Err(MountError::Failed("unmount timed out after 30s".into())));
             if result.is_ok() && matches!(why, Reason::NotDesired | Reason::Manual) {
@@ -929,7 +960,8 @@ impl Actor {
             async move {
                 // drivers answer within ~5s even on a hung FUSE mount; this cap only guards a driver bug
                 let limit = Duration::from_secs(30);
-                let state = (tokio::time::timeout(limit, d.inspect(&h)).await)
+                let inspect = caught("driver", || d.inspect(&h), MountState::Degraded);
+                let state = (tokio::time::timeout(limit, inspect).await)
                     .unwrap_or_else(|_| MountState::Degraded("inspect timed out".into()));
                 let _ = tx.send(Msg::Health {
                     id,
@@ -1086,8 +1118,10 @@ impl Actor {
                 last_error: p.last_error.clone(),
             })
             .collect();
-        let drivers = (self.probes.iter())
-            .map(|(name, a)| match a {
+        // every built driver, from the first snapshot on: "probing" until its first probe answers (S3 sign-off 2b)
+        let probing = DriverAvailability::Unavailable("probing".into());
+        let drivers = (self.drivers.keys())
+            .map(|name| match self.probes.get(name).unwrap_or(&probing) {
                 DriverAvailability::Available { binary, detail } => DriverDto {
                     name: name.clone(),
                     available: true,
@@ -1609,7 +1643,8 @@ pub(crate) mod tests {
         };
         let held: Vec<&str> = st.held.iter().map(|i| i.as_str()).collect();
         let mut h = r2.start(cfg, true, &held, &[]);
-        h.until("probed", |s| !s.drivers.is_empty()).await;
+        h.until("probed", |s| s.drivers.iter().any(|d| d.available))
+            .await;
         h.reconcile().await;
         assert!(mount(&h.status.borrow(), "a").unwrap().held);
         assert!(r2.calls().is_empty());
@@ -1773,6 +1808,38 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(seen, 2, "{:?}", s.events); // MountRequested + MountFailed (core leaves the latter's id empty)
+    }
+
+    #[tokio::test]
+    async fn executor_panic_recovers() {
+        let r = rig("panic");
+        r.drv.fake.panic_next("a");
+        let mut h = r.start(r.cfg(RECON, &machine("a")), true, &[], &[]);
+        // the panic is a failed mount at the executor's generation: Absent with a backoff, not stuck Connecting
+        let s = h.until("failed", |s| failed(s, "a")).await;
+        let m = mount(&s, "a").unwrap();
+        assert_eq!(m.state, Availability::Failed);
+        let e = m.last_error.as_deref();
+        assert_eq!(e, Some("driver panicked: fake: panic_next"));
+        assert!(m.action.starts_with("waiting (backoff"), "{}", m.action);
+        h.until("remounted", |s| is(s, "a", Availability::Mounted))
+            .await;
+        assert_eq!(r.calls(), ["mount a", "mount a"]);
+    }
+
+    #[tokio::test]
+    async fn drivers_listed_in_first_snapshot() {
+        let r = rig("probing");
+        let mut h = r.start(r.cfg(RECON, ""), true, &[], &[]);
+        // no await since spawn: on this current-thread runtime the probe task hasn't run yet
+        let first: Vec<_> = (h.status.borrow().drivers.iter())
+            .map(|d| (d.name.clone(), d.available, d.detail.clone()))
+            .collect();
+        assert_eq!(first, [("sshfs".to_string(), false, "probing".to_string())]);
+        let s = h
+            .until("probed", |s| s.drivers.iter().any(|d| d.available))
+            .await;
+        assert_eq!(s.drivers.len(), 1);
     }
 
     #[tokio::test]
