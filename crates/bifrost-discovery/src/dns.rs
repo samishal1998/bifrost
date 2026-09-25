@@ -559,14 +559,11 @@ mod tests {
 
     /// Against the p08 zone: `T=$(mktemp -d); source tests/e2e/lib.sh; source tests/e2e/p08_dns.sh;
     /// setup_p08`, then `cargo test -p bifrost-discovery -- --ignored coredns_discovery`, then
-    /// `docker rm -f bf-e2e-dns`. BIFROST_E2E_DNS overrides the 127.0.0.1:5353 nameserver.
+    /// `docker rm -f bf-e2e-dns`.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs the p08 coredns container (tests/e2e/p08_dns.sh setup_p08)"]
     async fn coredns_discovery() {
-        let ns: SocketAddr = std::env::var("BIFROST_E2E_DNS")
-            .unwrap_or("127.0.0.1:5353".into())
-            .parse()
-            .unwrap();
+        let ns: SocketAddr = "127.0.0.1:5353".parse().unwrap();
         let p = DnsProvider::new("dns".into(), h("test.bifrost"), vec![ns]).unwrap();
         let obs = p.discover().await.unwrap();
         let ids: Vec<&str> = obs.iter().map(|o| o.id.as_str()).collect();

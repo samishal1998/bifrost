@@ -56,8 +56,8 @@ check_p08() {
   ok "p08: other-01 not in mountinfo" not is_mounted "$T/machines/other-01"
   ok "p08: bad-node absent" p08_no_machine bad-node
   ok "p08: evil absent" p08_no_machine evil
-  ok "p08: bad-node warned in d.log" grep -q 'WARN.*_bifrost\.bad-node\.' "$T/d.log"
-  ok "p08: evil warned in d.log" grep -q 'WARN.*_bifrost\.evil\.' "$T/d.log"
+  ok "p08: bad-node warned in d.log" grep -q 'bf1 node skipped.*_bifrost\.bad-node\..*invalid host' "$T/d.log"
+  ok "p08: evil warned in d.log" grep -q 'bf1 node skipped.*_bifrost\.evil\..*invalid native id' "$T/d.log"
   ok "p08: canary \$T/pwned never created" not test -e "$T/pwned"
   p08_zone 2 ""
   ok "p08: dev tag removed + serial bump → agent-dns unmounted within 30s" wait_until 30 p08_unmounted
