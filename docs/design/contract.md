@@ -1433,8 +1433,8 @@ CLI global flags: `--json` (pretty-prints the DTO), `--socket PATH` (env `BIFROS
 | `status` | yes | GET status | summary block (below) |
 | `machines`, `machines list` | yes | GET machines | `NAME SOURCE ADDRESS STATE MOUNTED` (PRD §18) |
 | `machines show <id>` | yes | GET machines, filtered by id (E1) | key/value lines: verdict, address:port, online, tags, metadata, shadowed, mounts |
-| `mounts` | yes | GET mounts | `ID MACHINE DRIVER STATE LOCAL REMOTE` (+ `ERROR` when any is set) |
-| `mount <target> [--no-wait]` | yes | POST …/mount, then poll GET mounts every 250 ms for up to 60 s | `agent-01  mounted  /home/sami/machines/agent-01 (sshfs, pid 4242)` or `agent-01  failed: <last_error>` (exit 1) |
+| `mounts` | yes | GET mounts | `ID MACHINE DRIVER STATE LOCAL REMOTE` (+ `ERROR` when any row has one: `last_error`, else `detail`, B15) |
+| `mount <target> [--no-wait]` | yes | POST …/mount, then poll GET mounts every 250 ms for up to 60 s | `agent-01  mounted  /home/sami/machines/agent-01 (sshfs, pid 4242)` or `agent-01  failed: <last_error, else detail>` (exit 1; a driver-selection failure has only `detail`, B15) |
 | `unmount <target> [--force] [--no-wait]` | yes | POST …/unmount, then poll | `agent-01  unmounted (held; 'bifrost mount agent-01' to resume)` or `agent-01  unmount blocked: busy (files open); retry with --force` (exit 1, C4) |
 | `discover` | yes | POST discover, then poll status until every provider's `refreshes` increases (≤ 30 s) | `PROVIDER KIND STATUS MACHINES LAST-OK` |
 | `reconcile` | yes | POST reconcile | `MOUNT ACTION` |
@@ -1514,7 +1514,7 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
 | r | reconcile |
 | s | discover now |
 | c | reload config |
-| d / Enter | details popup (verdict, observations, last_error, next retry) |
+| d / Enter | details popup (verdict, observations, `last_error`, else `detail` (B15), next retry) |
 | l | jump to Logs for the selection |
 | / | filter (substring; Enter applies, Esc clears) |
 | ? | help |
@@ -1609,11 +1609,11 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
 - **cli:** `machines_table_golden`, `mounts_table_golden`, `status_block_golden`, `exit3_when_daemon_absent` (runs the binary against a bogus socket), `config_check_output_deterministic`.
 - **tui:** `renders_machines_with_glyphs_and_teal`, `key_m_emits_mount_for_selection`, `U_asks_confirmation`, `filter_narrows_rows`, `unreachable_banner`, `no_color_disables_styles`.
 
-**E2E harness.** `tests/e2e/run.sh [m1|all]`, using bash, docker, jq, python3, curl, ssh-keygen and ssh-keyscan (C7).
+**E2E harness.** `tests/e2e/run.sh [m1|all]`, using bash, docker, jq, python3, curl, dig (p08), pgrep from procps (p13a), fusermount3 (cleanup), ssh-keygen and ssh-keyscan (C7).
 
 - Each phase file `pNN_*.sh` defines up to three functions: `setup_<p>` (fixtures), `config_<p>` (prints a TOML fragment) and `check_<p>` (assertions).
 - `run.sh` sources `lib.sh` and the phase files **listed explicitly** for the chosen mode (no glob, so collation can't reorder `p13_hardening` and `p13a_adopt`; C7), then calls every `setup_*`, concatenates the `config_*` output after `config.tmpl.toml`, starts the daemon, and calls every `check_*` in list order.
-- **S2-G writes both complete lists into `run.sh`**: m1 is `p04_sshfs p05_api p06_recovery psec_hostkey p13a_adopt`; `all` appends `p07_tailscale p08_dns p09_rclone p10_http p12_reload p13_hardening`. A listed phase file that doesn't exist yet is skipped with a `skip: <file> (not present)` line, so S3's `run.sh all` runs p04–p10 before S4 adds p12/p13. **Adding a phase edits only its own file**; no S3/S4 agent touches `run.sh` (owned by S2-G, C7). `// ponytail: a missing listed file is skipped, not an error; the final gate's run.sh all must print no skip lines.`
+- **S2-G writes both complete lists into `run.sh`**: m1 is `p04_sshfs p05_api p06_recovery psec_hostkey p13a_adopt`; `all` appends `p07_tailscale p08_dns p09_rclone p10_http p12_reload p13_hardening`. A listed phase file that doesn't exist yet is skipped with a `skip: <file> (not present)` line, so S3's `run.sh all` runs p04–p10 before S4 adds p12/p13. **Adding a phase edits only its own file**; no S3/S4 agent touches `run.sh` (owned by S2-G, C7). `run.sh` carries the bash comment `# ponytail: a missing listed phase file is skipped, not an error; upgrade: make a missing file fatal once S4 lands (the final gate requires no skip lines)`.
 - Only `p08` defines `[policy.*]` (B5); a second `[policy.deny]` fragment would collide in the concatenated TOML.
 
 ```bash
@@ -1661,7 +1661,7 @@ bifrostd > $T/d.log 2>&1 & DPID=$!; wait_until 10 bifrost daemon status
 
 ## 13. Staged execution plan
 
-This section mirrors the approved plan's S0–S4 task ownership exactly. Every agent edits only the files it owns. Every cargo command runs with the shared `CARGO_TARGET_DIR` (P2).
+This section mirrors the approved plan's S0–S4 file ownership exactly; the B7 and E5 tags follow the Refinements list after the Amendments table (B7 moves off S3-J, which owns no shared spawn or doctor code). Every agent edits only the files it owns. Every cargo command runs with the shared `CARGO_TARGET_DIR` (P2).
 
 **Safe-stub rule (S0):**
 - Unimplemented providers return `Err(DiscoveryError::Unavailable("not implemented"))`.
@@ -1812,7 +1812,7 @@ The critique triage from the approved plan, copied verbatim. IDs refer to `docs/
 
 ### Refinements (S0.2 verifier, round 1)
 
-These refine the rows above. Where a verbatim row's wording differs, this list and the body text win over that row.
+These refine the rows above. Where a verbatim row's wording differs, this list wins over that row.
 
 - **A18 / A6:** "`offline_grace_period` since start" means since the first successful config load (`cfg_loaded_at`). That is the daemon start whenever a config file exists at startup (§5 Warm-up, §8 `spawn`).
 - **A22 / A6:** A22 also covers the missing-config start. The default root `~/machines` is active, so a later file is applied only if its `mount.root` equals that root; otherwise a restart is needed (§8 Startup step 4, §15 #27).
@@ -1820,6 +1820,6 @@ These refine the rows above. Where a verbatim row's wording differs, this list a
 - **A16:** The row 11 gate falls through instead of returning. Row 12 still detaches a hung mount after grace, and row 13 shows `"change pending: …"` for a working mount (§5 table).
 - **A9 / A10:** In the A10 fallback, an entry with the driver's own fstype at `local_path` counts as ours for mount step 2 (lazy detach, never adopt) and for the timeout detach (§6).
 - **B7:** The hint code is owned by S1-C (shared `mount/src/lib.rs` spawn and readiness code), S2-F (doctor) and S4-N (README). S3-J inherits it and owns no B7 code.
-- **E5:** `StatusDto.auto_driver` (the daemon's `select_driver(&Auto, …)`) is the one source for the default shown by status, doctor, `drivers` and the TUI. The per-driver `auto_rank` stays cut.
+- **E5:** `StatusDto.auto_driver` (the daemon's `select_driver(&Auto, …)`) is the one source for the default shown by status, doctor, `drivers` and the TUI; S2-F owns the status, doctor and `drivers` printing. The per-driver `auto_rank` stays cut.
 - **C7:** S2-G writes both complete `run.sh` lists; a listed phase file that doesn't exist yet is skipped. S3 and S4 agents never edit `run.sh`.
 - **A8:** `clean` caps are 128 for names, 256 for metadata values and 512 for errors and log lines.
