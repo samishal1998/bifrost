@@ -50,11 +50,13 @@ pub async fn timed<T: Send + 'static>(
 /// symlink_metadata(path/".bifrost-probe-<16hex nonce>") under timed(5s):
 /// any server reply — Ok, NotFound, PermissionDenied — → Healthy (A17: an unsearchable remote root is not a fault);
 /// NotConnected (macOS also raw errno 6 ENXIO) → Stale; other → Degraded(e); None → Degraded("unresponsive").
+/// `key` names the mount instance for the in-flight guard: a probe stuck on a lazily detached one
+/// must not hold the path against the next mount there.
 // ponytail: probe timeout fixed at 5s, slow links under load can read as Degraded (no action until grace); a key if false Degraded reports annoy
-pub async fn liveness(path: &Path) -> MountState {
+pub async fn liveness(path: &Path, key: &Path) -> MountState {
     // a unique name: neither the kernel nor sshfs can answer it from a cache
     let probe = path.join(format!(".bifrost-probe-{:016x}", random_u64()));
-    match timed(path, Duration::from_secs(5), move || {
+    match timed(key, Duration::from_secs(5), move || {
         std::fs::symlink_metadata(probe)
     })
     .await
@@ -230,9 +232,27 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_local_dir_healthy() {
-        assert_eq!(liveness(&tmpdir("live")).await, MountState::Healthy);
+        let d = tmpdir("live");
+        assert_eq!(liveness(&d, &d).await, MountState::Healthy);
         let gone = tmpdir("live-gone").join("nope");
-        assert_eq!(liveness(&gone).await, MountState::Healthy); // NotFound is a reply (A17)
+        assert_eq!(liveness(&gone, &gone).await, MountState::Healthy); // NotFound is a reply (A17)
+    }
+
+    #[tokio::test]
+    async fn liveness_keyed_per_instance() {
+        // a probe stuck on a lazily detached instance must not mark the next mount at that path unresponsive
+        let d = tmpdir("live-inst");
+        let old = d.join(".pid-1");
+        let stuck = timed(&old, Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(())
+        });
+        assert!(stuck.await.is_none());
+        assert_eq!(
+            liveness(&d, &old).await,
+            MountState::Degraded("unresponsive".into())
+        );
+        assert_eq!(liveness(&d, &d.join(".pid-2")).await, MountState::Healthy);
     }
 
     #[tokio::test]

@@ -263,13 +263,16 @@ fn with_hint(t: String) -> String {
     }
 }
 
-/// tail(last 2 KiB of the child log, 512) (A8) + the B7 hint.
+/// tail(last 2 KiB of the child log, 512) (A8) + the B7 hint. Reads only those 2 KiB: the peer sizes the log.
 fn log_tail(p: &Path) -> String {
-    let b = std::fs::read(p).unwrap_or_default();
-    with_hint(tail(
-        &String::from_utf8_lossy(&b[b.len().saturating_sub(2048)..]),
-        512,
-    ))
+    use std::io::{Read, Seek, SeekFrom};
+    let mut b = Vec::new();
+    if let Ok(mut f) = std::fs::File::open(p) {
+        let len = f.metadata().map_or(0, |m| m.len());
+        let _ = f.seek(SeekFrom::Start(len.saturating_sub(2048)));
+        let _ = f.take(2048).read_to_end(&mut b);
+    }
+    with_hint(tail(&String::from_utf8_lossy(&b), 512))
 }
 
 /// mount() steps 1–6 for any driver (§6): `bin` and `ssh` are absolute, `argv` is the driver's own.
@@ -403,7 +406,12 @@ pub(crate) async fn inspect_path(h: &MountHandle) -> bifrost_core::MountState {
     let mark = marker(&h.id, &h.fingerprint);
     match table::find(&t, &h.local_path) {
         Some(e) if !cfg!(target_os = "linux") || e.source == mark => {
-            check::liveness(&h.local_path).await
+            // ponytail: instance key = path + pid (never touched on disk); two pid-less adoptions at one path share it; mountinfo field 1 if that ever bites
+            let key = (h.pid).map_or_else(
+                || h.local_path.clone(),
+                |p| h.local_path.join(format!(".pid-{p}")),
+            );
+            check::liveness(&h.local_path, &key).await
         }
         _ => bifrost_core::MountState::Missing,
     }
@@ -440,6 +448,23 @@ pub(crate) mod tests {
 
     pub(crate) fn tmpdir(name: &str) -> Tmp {
         Tmp(fresh_dir(name))
+    }
+
+    #[test]
+    fn log_tail_reads_only_the_tail() {
+        // a peer-sized (sparse) log: only the last 2 KiB is ever read
+        let d = tmpdir("logtail");
+        let p = d.join("x.log");
+        let f = std::fs::File::create(&p).unwrap();
+        f.set_len(64 << 30).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&p)
+            .unwrap()
+            .write_all(b"\nboom\n")
+            .unwrap();
+        assert_eq!(log_tail(&p), "boom");
+        assert_eq!(log_tail(&d.join("missing")), "");
     }
 
     pub(crate) fn spec(
