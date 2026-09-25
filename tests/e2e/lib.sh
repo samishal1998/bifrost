@@ -71,3 +71,49 @@ EOF
 
 # stop_sshd : remove the container (host keys live in the image, so a restart keeps known_hosts valid).
 stop_sshd() { docker rm -f bf-e2e-sshd >/dev/null 2>&1 || true; }
+
+# --- assertions for the run.sh phases ---
+
+FAILS=0
+# ok DESC CMD... : run CMD, print "PASS: DESC" or "FAIL: DESC" (plus CMD's last output lines); a FAIL is
+# counted and the run goes on. CMD runs in a subshell, so it can't change shell state (DPID etc.).
+ok() {
+  local d=$1 out; shift
+  if out=$("$@" 2>&1); then
+    echo "PASS: $d"
+  else
+    echo "FAIL: $d"
+    [[ -z $out ]] || tail -n 5 <<<"$out" | sed 's/^/  | /'
+    FAILS=$((FAILS + 1))
+  fi
+}
+not() { ! "$@"; }
+
+# state_is ID STATE : the mount's state is STATE.
+state_is() { [[ $(mstate "$1") == "$2" ]]; }
+
+# mjq ID FILTER : jq FILTER over the mount's MountDto is true, e.g. `mjq static1 .held`.
+mjq() { bifrost --json mounts | jq -e --arg id "$1" ".[] | select(.id == \$id) | $2" >/dev/null; }
+
+# events SEQ FILTER CMP : the count of status events with seq > SEQ whose .event matches FILTER satisfies CMP
+# ("> 0", "== 0"). The ring holds the running daemon instance's last 200 events.
+events() {
+  bifrost --json status |
+    jq -e --argjson s "$1" "[.events[] | select(.seq > \$s) | .event | select($2)] | length $3" >/dev/null
+}
+last_seq() { bifrost --json status | jq '[.events[].seq] | max // 0'; }
+
+# mnt_src PATH : "<fstype> <source>" of the mount at PATH (the mountinfo fields after the "-" separator).
+mnt_src() {
+  awk -v p="$1" '$5 == p { for (i = 7; i <= NF; i++) if ($i == "-") { print $(i + 1), $(i + 2); exit } }' \
+    /proc/self/mountinfo
+}
+
+# gone PATH : not a mount point, and the directory is removed.
+gone() { ! is_mounted "$1" && [[ ! -e $1 ]]; }
+
+# sig SIG PID : kill -SIG PID, only for a plain positive pid (an empty `mpid` never becomes a bare `kill`).
+sig() { [[ $2 =~ ^[1-9][0-9]*$ ]] && kill "-$1" "$2"; }
+
+# on_fuse CMD... : CMD on a FUSE path, SIGKILLed after 5s so a hung mount can't hang the run.
+on_fuse() { timeout -s KILL 5 "$@"; }
