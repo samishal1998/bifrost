@@ -23,10 +23,11 @@ m1=(p04_sshfs p05_api p06_recovery psec_hostkey p13a_adopt)
 case ${1:-m1} in
   m1) list=("${m1[@]}") ;;
   all) list=("${m1[@]}" p07_tailscale p08_dns p09_rclone p10_http p12_reload p13_hardening) ;;
-  *) echo "usage: $0 [m1|all]" >&2; exit 2 ;;
+  p[0-9]*_* | psec_*) list=("$@") ;; # explicit phase files, e.g. `run.sh p08_dns`: a stage agent's quick loop
+  *) echo "usage: $0 [m1|all|<phase> ...]" >&2; exit 2 ;;
 esac
 tools=(docker jq curl pgrep fusermount3 sshfs ssh-keygen ssh-keyscan)
-[[ ${1:-m1} != all ]] || tools+=(python3 dig) # p10's inventory.py, p08's dig
+[[ ${1:-m1} == m1 ]] || tools+=(python3 dig) # p10's inventory.py, p08's dig
 for t in "${tools[@]}"; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 2; }; done
 
 T=$(realpath "$(mktemp -d)") # realpath: the daemon canonicalizes the root, and paths are compared as text
