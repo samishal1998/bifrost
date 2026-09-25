@@ -53,6 +53,8 @@ pub enum Msg {
     },
     Api(ApiCmd),
     Tick(Tick),
+    /// Abort provider tasks, wait ≤5s for in-flight executors, write state.json, then reply (contract §8 shutdown).
+    Shutdown(oneshot::Sender<()>),
 }
 
 pub enum Tick {

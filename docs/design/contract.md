@@ -913,7 +913,7 @@ Notes on the table:
 | config change | poller / SIGHUP (`reload.rs`) / `POST /v1/config/reload` (`spawn_blocking(load)`) → `Msg::Config`; the actor applies it with the same config-apply path it uses at startup (A4) |
 | API | `Msg::Api(cmd)` with a oneshot reply (`ApiCmd::Discover` has none, E4) |
 
-**Warm-up.** `ready` is false until a config file has actually loaded (A6): with no config file, no healthy, un-held mount is unmounted (row 3 still clears a Stale or force-requested mount, and a held unmount goes through), and the grace period does not run. Once a config file has loaded, `ready` becomes true when every network provider has returned a **non-empty Ok** at least once (A18), or `offline_grace_period` has passed since the first successful config load (`cfg_loaded_at`: the daemon start when the file exists at startup, else the moment the poller's first file is applied). Measuring from the load, not the start, keeps a late-appearing config from being ready before any provider has reported. A static-only config is therefore ready immediately. An `Ok(vec![])` (for example a DNS NXDOMAIN on the index) and an `Err` never count. A provider whose `build_provider` failed never reports, so it waits for the grace period (B11). Once true, `ready` stays true. Before that, only rows 4/5 are blocked, and a held (manual) unmount goes through. Removal decisions that depend on discovery wait for discovery to have actually worked. A provider that is down at login delays removals by at most the grace period.
+**Warm-up.** `ready` is false until a config file has actually loaded (A6): with no config file, no healthy, un-held mount is unmounted (row 3 still clears a Stale or force-requested mount, and a held unmount goes through), and the grace period does not run. Once a config file has loaded, `ready` becomes true when every network provider has returned a **non-empty Ok** at least once (A18), or `offline_grace_period` has passed since the first successful config load (`cfg_loaded_at`: the daemon start when the file exists at startup, else the moment the first `Msg::Config` with Ok is applied, whether it comes from the poller, SIGHUP or the API). Measuring from the load, not the start, keeps a late-appearing config from being ready before any provider has reported. A static-only config is therefore ready immediately. An `Ok(vec![])` (for example a DNS NXDOMAIN on the index) and an `Err` never count. A provider whose `build_provider` failed never reports, so it waits for the grace period (B11). Once true, `ready` stays true. Before that, only rows 4/5 are blocked, and a held (manual) unmount goes through. Removal decisions that depend on discovery wait for discovery to have actually worked. A provider that is down at login delays removals by at most the grace period.
 
 **Concurrency model.** One actor task owns all mutable state: `Arc<Config>`, the registry, runtimes, `held`, probe results, the previous verdicts, provider status and the event ring. There are no locks on domain state.
 
@@ -929,6 +929,7 @@ pub enum Msg {
     Config { result: Result<Box<Config>, Vec<ConfigError>>, reply: Option<oneshot::Sender<ReloadDto>> },
     Api(ApiCmd),
     Tick(Tick),
+    Shutdown(oneshot::Sender<()>),              // abort provider tasks, wait ≤5s for executors, write state.json, reply
 }
 pub enum Tick { Health, Fallback }
 ```
@@ -973,10 +974,10 @@ pub mod check {
     /// any server reply — Ok, NotFound, PermissionDenied — → Healthy (A17: an unsearchable remote root is not a fault);
     /// NotConnected (macOS also raw errno 6 ENXIO) → Stale; other → Degraded(e); None → Degraded("unresponsive").
     pub async fn liveness(path: &Path) -> MountState;
-    /// `path` (a PATH-style list) + /usr/local/bin:/usr/bin:/bin (+ macos /opt/homebrew/bin); is_file ∧ mode & 0o111.
+    /// Searches ONLY `path` (a PATH-style list); is_file ∧ mode & 0o111. The fixed fallback dirs live in `which()`.
     /// Tests pass their own `path` and never call `set_var` (unsafe in edition 2024, racy across test threads) (B14).
     pub fn which_in(name: &str, path: &OsStr) -> Option<PathBuf>;
-    pub fn which(name: &str) -> Option<PathBuf>;           // which_in(name, $PATH)
+    pub fn which(name: &str) -> Option<PathBuf>;           // which_in(name, $PATH + /usr/local/bin:/usr/bin:/bin [+ macos /opt/homebrew/bin])
     pub async fn run(bin: &Path, args: &[OsString], t: Duration) -> std::io::Result<std::process::Output>; // stdin null, kill_on_drop(true)
     pub async fn ssh_preflight(ssh: &Path, spec: &MountSpec, ssh_config: Option<&Path>) -> Result<(), MountError>;
 }
@@ -1379,6 +1380,7 @@ In the actor (`actor.rs`), one config-apply path serves startup and every `Msg::
   - rebuild `policy` and templates;
   - rebuild drivers with `(deps.drivers)(&settings)` (A5) if `ssh_config`, `vfs_cache_mode` or `mount_timeout` changed, then re-probe;
   - swap the config, mark it loaded (A6), emit `ConfigurationReloaded{ok: true}`, clear `config_errors`, run a pass.
+  - **At startup** the same path runs once on the initial config, with two differences: it marks the config loaded only when `cfg_loaded` is true (so an empty default from a missing file never starts the grace clock), and it emits no `ConfigurationReloaded`.
 - Any other changed spec changes the fingerprint, which leads to a graceful remount through row 11.
 
 **state.json.** Written tmp → `sync_all` → rename, with mode 0600, whenever `held` or the mount handles change.
@@ -1397,9 +1399,11 @@ In the actor (`actor.rs`), one config-apply path serves startup and every `Msg::
 Every emitted `Event` is also logged at info with the same fields. Header values are never logged; `Secret` prints `***` in Debug.
 
 **Graceful shutdown (SIGTERM/SIGINT) does not unmount.**
-1. Stop the API and provider tasks.
-2. Wait up to 5s for in-flight executor tasks.
-3. Write state.json, remove the socket, exit 0.
+1. main stops the API (graceful shutdown of `axum::serve`, raced against 2s).
+2. main sends `Msg::Shutdown(reply)`. The actor aborts its provider tasks, waits up to 5s for in-flight executor tasks, writes state.json and replies (main waits ≤7s for the reply).
+3. main removes the socket and exits 0.
+
+The actor owns the provider and executor tasks (A4), so shutdown goes through the inbox; `Msg::Shutdown` is part of the frozen `Msg` (A3).
 
 The children run in their own process groups, so they keep serving and are adopted on the next start. A restart and a crash therefore take the same, tested path. Teardown is `bifrost unmount <target>`.
 
@@ -1595,7 +1599,7 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
   - mount table: `mountinfo_octal_escapes`, `mountinfo_optional_fields`, `mountinfo_malformed_skipped`;
   - argv golden tests: `sshfs_argv_linux_golden`, `sshfs_argv_macfuse_golden`, `sshfs_argv_fuset_golden`, `sshfs_argv_ipv6_home_port_ro_cfg`, `rclone_argv_mount_golden`, `rclone_argv_nfsmount_forces_writes`, `rclone_sftp_ssh_tokens_clean_cfg_quoted`, `preflight_argv_golden`;
   - argv safety: **`argv_never_weakens_host_keys`** (forbidden list includes `sftp_server`; written by S1-C against the `vec![]` rclone stub, extended by S3-J, B13), `positionals_never_start_with_dash`, `rclone_never_uses_internal_ssh`;
-  - fs and probes: `adopt_marker_record_foreign_outside_root` (pid from the state record with the same `local_path`, else None, B15), `mount_step2_own_marker_adopt_or_detach_foreign_refused` (A9), `prepare_mountpoint_creates_rejects_symlink_file_nonempty`, `which_respects_exec_bit`, `timed_guard_single_thread` (the closure sleeps; a second call returns None immediately), `probe_fake_sshfs_in_path` (a temp script printing "SSHFS version 3.7.3", found via `which_in`/`probe_with`; tests never call `set_var`, B14), `probe_missing_binary_unavailable`, `rclone_nfs_unavailable_on_linux`;
+  - fs and probes: `adopt_marker_record_foreign_outside_root` (pid from the state record with the same `local_path`, else None, B15), `mount_step2_own_marker_adopt_or_detach_foreign_refused` (A9), `prepare_mountpoint_creates_rejects_symlink_file_nonempty`, `which_respects_exec_bit`, `timed_guard_single_thread` (the closure sleeps; a second call returns None immediately), `probe_fake_sshfs_in_path` (temp dir with fake `sshfs` printing "SSHFS version 3.7.3" plus fake `ssh` and `fusermount3`, found via `which_in`/`probe_with`, which search only the given dir; tests never call `set_var`, B14), `probe_missing_binary_unavailable`, `rclone_nfs_unavailable_on_linux`;
   - `#[ignore]` docker tests (needs `BIFROST_E2E_SSH=host:port:user:ssh_config` from `tests/e2e/lib.sh`): `sshfs_mount_inspect_unmount`, `sshfs_kill9_auto_unmount_missing`, `rclone_mount_write_roundtrip`, `rclone_kill9_stale_then_lazy`, `preflight_exit0_and_hostkey_failure`. The kill tests signal the child by its `MountHandle.pid`, never `pkill -f fsname=`, which would also kill the fusermount3 auto_unmount helper (A13).
 - **discovery:**
   - tailscale: `tailscale_fixture_parse` (Self excluded, `tag:` stripped, `Tags` absent, trailing dot trimmed, `Peer: null`, MagicDNS off → IP, duplicate HostName resolved via DNSName, a capitalised HostName fallback kept), `tailscale_backend_stopped_unavailable`, `tailscale_new_peer_appears` (a fake `tailscale` script swaps its fixture between two `discover()` calls), `#[ignore] tailscale_live_status`;

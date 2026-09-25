@@ -21,13 +21,13 @@ pub async fn liveness(_path: &Path) -> MountState {
     MountState::Degraded("not implemented".into()) // STUB (S1-C)
 }
 
-/// `path` (a PATH-style list) + /usr/local/bin:/usr/bin:/bin (+ macos /opt/homebrew/bin); is_file ∧ mode & 0o111.
+/// Searches ONLY `path` (a PATH-style list); is_file ∧ mode & 0o111. The fixed fallback dirs live in `which()`.
 /// Tests pass their own `path` and never call `set_var` (unsafe in edition 2024, racy across test threads) (B14).
 pub fn which_in(_name: &str, _path: &OsStr) -> Option<PathBuf> {
     None // STUB (S1-C)
 }
 
-/// which_in(name, $PATH)
+/// which_in(name, $PATH + /usr/local/bin:/usr/bin:/bin [+ macos /opt/homebrew/bin])
 pub fn which(_name: &str) -> Option<PathBuf> {
     None // STUB (S1-C)
 }
