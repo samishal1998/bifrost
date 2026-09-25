@@ -1,6 +1,7 @@
 # p07 (all, opt-in E2E_TAILSCALE=1): tailscale discovery against the live tailnet, discovery ONLY.
 # The provider has no filter and no allow rule matches, so every peer is discover-only: nothing is ever
-# mounted. Never runs `tailscale up/down/set`. Failure output prints counts only, never peer names.
+# mounted. Never runs `tailscale up/down/set`. p07's own FAIL lines print counts only. On any FAIL, run.sh's
+# daemon-log tail and the kept $T (d.log, state.json) name real peers: never paste them into commits, issues or fixtures.
 
 config_p07() {
   [[ ${E2E_TAILSCALE:-} == 1 ]] || return 0
@@ -27,7 +28,7 @@ p07_no_mounts() {
 p07_match() {
   local got want
   got=$(p07_ids) want=$(p07_want)
-  [[ $got == "$want" ]] || { echo "daemon has $(wc -l <<<"$got") ids, tailscale status has $(wc -l <<<"$want")"; return 1; }
+  [[ $got == "$want" ]] || { echo "daemon has $(grep -c . <<<"$got") ids, tailscale status has $(grep -c . <<<"$want")"; return 1; }
 }
 
 check_p07() {

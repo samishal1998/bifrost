@@ -129,6 +129,8 @@ struct Status {
 #[derive(Deserialize)]
 struct Tailnet {
     MagicDNSEnabled: bool,
+    #[serde(default)]
+    MagicDNSSuffix: String,
 }
 
 #[allow(non_snake_case)]
@@ -154,7 +156,13 @@ pub fn parse_status(json: &[u8]) -> Result<Vec<MachineObservation>, DiscoveryErr
             "backend state {state}"
         )));
     }
-    let magic = s.CurrentTailnet.is_some_and(|t| t.MagicDNSEnabled);
+    let (magic, own) = match s.CurrentTailnet {
+        Some(t) => (
+            t.MagicDNSEnabled,
+            format!(".{}.", t.MagicDNSSuffix.trim_end_matches('.')),
+        ),
+        None => (false, String::new()),
+    };
     // ponytail: skipped peers only warn! into the log (§15 #22); upgrade: `warnings` in ProviderDto
     let skip = |record: &str, reason: &str| {
         warn!(record = %clean(record, 128), reason = %clean(reason, 512), "tailscale peer skipped");
@@ -166,7 +174,16 @@ pub fn parse_status(json: &[u8]) -> Result<Vec<MachineObservation>, DiscoveryErr
             Err(e) => skip(&key, &e.to_string()),
         }
     }
-    peers.sort_by(|a, b| a.DNSName.cmp(&b.DNSName)); // decides which duplicate id wins
+    // decides which duplicate id wins: our tailnet's control-assigned names, then shared-in (foreign suffix),
+    // then HostName-only (DNSName ""), so a lower-trust identity never evicts one of our own nodes.
+    // No CurrentTailnet → own = "" (every name matches); empty suffix → ".." (none does): plain DNSName order.
+    peers.sort_by_cached_key(|p| {
+        (
+            p.DNSName.is_empty(),
+            !p.DNSName.ends_with(&own),
+            p.DNSName.clone(),
+        )
+    });
     let mut out = BTreeMap::new();
     for p in peers {
         let record = if p.DNSName.is_empty() {
@@ -177,7 +194,10 @@ pub fn parse_status(json: &[u8]) -> Result<Vec<MachineObservation>, DiscoveryErr
         match observation(p, magic) {
             Err(why) => skip(&record, &why),
             Ok(o) => match out.entry(o.id.clone()) {
-                Entry::Occupied(_) => skip(&record, "duplicate id (first by DNSName wins)"),
+                Entry::Occupied(_) => skip(
+                    &record,
+                    "duplicate id (own tailnet first, then shared-in, then HostName-only)",
+                ),
                 Entry::Vacant(e) => {
                     e.insert(o);
                 }
@@ -301,8 +321,8 @@ mod tests {
     #[test]
     fn tailscale_fixture_parse() {
         let o = parse_status(FIXTURE).unwrap();
-        // Self excluded; devbox.other.ts.net. repeats the id "devbox" and loses (sorted by DNSName, first wins);
-        // the capitalised HostName fallback is kept (lowercased)
+        // Self excluded; the shared-in devbox.other.ts.net. repeats the id "devbox" and loses to our own
+        // tailnet's devbox (own suffix first); the capitalised HostName fallback is kept (lowercased)
         assert_eq!(ids(&o), ["devbox", "devbox-1", "fixture-macbook", "phone"]);
         let tags = ["dev", "server"].map(String::from); // "tag:" stripped, lowercased, "bad tag!" dropped
         let values = [
@@ -338,6 +358,16 @@ mod tests {
         assert_eq!(addrs(m), ["100.64.0.12", "fd7a:115c:a1e0::c"]);
         assert!(!m.metadata.values.contains_key("dns_name"));
         assert_eq!(get(&o, "phone").name, "localhost");
+
+        // a shared-in node whose suffix sorts first and a HostName-only "devbox" never take our node's id
+        let mut v = fixture();
+        v["Peer"]["nodekey:0000000000000000000000000000000000000000000000000000000000000005"]["DNSName"] =
+            json!("devbox.aaa.ts.net.");
+        v["Peer"]["k06"] = json!({"ID": "nX", "HostName": "devbox", "DNSName": "", "TailscaleIPs": ["100.64.0.30"], "Online": true});
+        let own = |v: &Value| get(&parse(v).unwrap(), "devbox").native_id.clone();
+        assert_eq!(own(&v).as_deref(), Some("nDevbox0001CNTRL"));
+        v["CurrentTailnet"] = Value::Null; // no suffix known: plain DNSName order, HostName-only last
+        assert_eq!(own(&v).as_deref(), Some("nShared0005CNTRL"));
 
         // MagicDNS off (or no CurrentTailnet) → first IPv4, then every IP
         let mut v = fixture();
