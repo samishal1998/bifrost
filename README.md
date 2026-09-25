@@ -77,7 +77,7 @@ bifrost unmount agent-01        # unmounts and holds it down, even across daemon
 bifrost mount agent-01          # clears the hold and mounts again
 ```
 
-`ssh agent-01` has to work non-interactively first (key or agent, and a known host key). Bifröst runs ssh with
+`ssh sami@agent-01` has to work non-interactively first (key or agent, and a known host key). Bifröst runs ssh with
 `BatchMode=yes` and never prompts. `bifrost mount` and `bifrost unmount` wait for the result (up to 60s) unless
 you pass `--no-wait`.
 
