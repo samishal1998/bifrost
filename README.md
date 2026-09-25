@@ -92,11 +92,12 @@ you pass `--no-wait`.
 - log level: `BIFROST_LOG=error|warn|info|debug|trace` (default `info`), written to stderr.
 
 **Rules:**
-- A missing config file runs an empty default (root `~/machines`, no machines), with a warning.
+- A missing or empty (0-byte) config file runs an empty default (root `~/machines`, no machines), with a warning.
 - An invalid config stops `bifrostd` from starting (exit 2), so it never unmounts everything.
 - Edits are picked up automatically (polled every 2s; applied once two reads agree, so within 2–4s), or at once
   with `bifrost config reload` or SIGHUP. An invalid edit keeps the running config and shows in `bifrost status`.
-  Changing `mount.root` needs a restart.
+  A file emptied at runtime (a `>` redirect still being written) keeps the running config too; only an explicit
+  reload applies an empty file. Changing `mount.root` needs a restart.
 - Unknown keys are errors, so a typo or a `password = …` line is rejected. `bifrost config check [PATH]` prints
   every error sorted, the same bytes every time.
 - `~`, `$VAR` and `${VAR}` are expanded only in `mount.root`, `mount.ssh_config`, `discovery.url` and header
@@ -254,8 +255,8 @@ refreshes now).
 
 A machine missing from successful refreshes is dropped after `max(TTL, 3 × interval)`, and its mount is unmounted
 gracefully. A provider that fails keeps serving its last good view, frozen until it recovers; one that could not
-start at all is retried on the next `bifrost config reload` or SIGHUP. Invalid records are skipped one by one with
-a warning in the daemon log.
+start at all is retried every `reconcile_interval` and on the next `bifrost config reload` or SIGHUP. Invalid
+records are skipped one by one with a warning in the daemon log.
 
 **Tailscale** (`type = "tailscale"`, trust 1):
 - runs `tailscale status --json` (10s timeout); it never runs `tailscale up`, `down` or `set`;

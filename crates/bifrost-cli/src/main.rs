@@ -343,7 +343,8 @@ async fn settle(
 
 /// POST discover (202 at once, E4), then poll status until every provider's `refreshes` increases (≤ 30 s).
 async fn discover(c: &Client, json: bool) -> Result<(), ClientError> {
-    // static has no task, and a provider whose build failed (B11) has none either: neither ever refreshes
+    // static has no task, and a provider whose build failed (B11) has none either: neither refreshes on a discover
+    // (a failed build is retried only by a reload or the fallback tick)
     let waits =
         |p: &&ProviderDto| p.kind != "static" && !(p.refreshes == 0 && p.last_error.is_some());
     let before: StatusDto = c.get("/v1/status").await?;

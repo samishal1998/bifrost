@@ -164,7 +164,7 @@ struct Provider {
     cfg: ProviderConfig,
     task_gen: u64,
     /// None when build_provider failed: no task, so warm-up waits for the grace period (B11); the next apply,
-    /// an unchanged reload included, retries the build
+    /// an unchanged reload included, or the next fallback tick retries the build
     task: Option<Task>,
     notify: Arc<Notify>,
     refreshes: u64,
@@ -464,8 +464,17 @@ impl Actor {
             }
             Msg::Api(cmd) => self.api(cmd),
             Msg::Tick(Tick::Health) => self.health_round(),
-            Msg::Tick(Tick::Fallback) => self.probe(), // the pass follows its Msg::Probed
-            Msg::Shutdown(_) => {}                     // run() takes it
+            Msg::Tick(Tick::Fallback) => {
+                // a failed build gets another try without waiting for a reload (B11 stays: no task until it builds)
+                let mut ps = std::mem::take(&mut self.providers);
+                for p in ps.values_mut().filter(|p| p.task.is_none()) {
+                    p.task_gen += 1;
+                    self.start_provider(p);
+                }
+                self.providers = ps;
+                self.probe(); // the pass follows its Msg::Probed
+            }
+            Msg::Shutdown(_) => {} // run() takes it
         }
     }
 
@@ -1972,6 +1981,21 @@ pub(crate) mod tests {
         // B11: no task; an unchanged reload (SIGHUP, `bifrost config reload`) retries the build
         r.fail_build.store(false, SeqCst);
         assert!(h.reload(r.cfg(RECON, FAKE)).await.ok);
+        h.until("m1", |s| s.machines.len() == 1).await;
+        assert_eq!(r.builds.load(SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn fallback_tick_retries_failed_provider_build() {
+        let r = rig("rebuild-tick");
+        r.fail_build.store(true, SeqCst);
+        r.set_disc(Ok(vec![obs("m1", "10.0.0.9")]));
+        let mut h = r.start(r.cfg(RECON, FAKE), true, &[], &[]);
+        h.until("build failed", |s| s.providers[0].last_error.is_some())
+            .await;
+        // nobody reloads: the fallback tick (every reconcile_interval) retries the build on its own
+        r.fail_build.store(false, SeqCst);
+        h.send(Msg::Tick(Tick::Fallback));
         h.until("m1", |s| s.machines.len() == 1).await;
         assert_eq!(r.builds.load(SeqCst), 2);
     }

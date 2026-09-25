@@ -71,8 +71,8 @@ impl Poller {
     }
 
     /// One read. It acts on a settled change once: sends the parsed config (bad bytes too, as Err), or warns
-    /// that the file is gone and the active config stays (on `hup` it sends that as Err too). `hup` skips the
-    /// debounce and acts even without a change.
+    /// that the file is gone or empty and the active config stays (on `hup` it sends the read error as Err, and
+    /// applies an empty file). `hup` skips the debounce and acts even without a change.
     /// Returns whether it acted.
     fn poll(&mut self, hup: bool) -> bool {
         let cur = read(&self.path);
@@ -96,6 +96,14 @@ impl Poller {
                         reply: None,
                     });
                 }
+            }
+            // a `>` redirect truncates first and its writer may wait seconds (a passphrase): never applied as the
+            // empty default by the poller (it would unmount every idle mount); SIGHUP and the API still apply it
+            Ok(bytes) if !hup && bytes.is_empty() => {
+                warn!(
+                    "config {}: empty; keeping the active config",
+                    path.display()
+                );
             }
             Ok(bytes) => {
                 let why = if hup { "SIGHUP" } else { "changed" };
@@ -230,6 +238,26 @@ mod tests {
         std::fs::write(&path, A).unwrap();
         assert!(!p.poll(false) && p.poll(false));
         assert_eq!(sent(&mut rx), [ok(&["box1"])]);
+    }
+
+    #[test]
+    fn poller_empty_file_keeps_active_and_warns_once() {
+        let (path, mut p, mut rx) = start("empty");
+        // a `>` redirect truncates first; the writer may take seconds (a passphrase prompt) to fill it
+        std::fs::write(&path, "").unwrap();
+        assert!(!p.poll(false) && p.poll(false), "warned");
+        assert!((0..4).all(|_| !p.poll(false)), "warned once");
+        assert!(
+            sent(&mut rx).is_empty(),
+            "never applied as the empty default"
+        );
+        std::fs::write(&path, B).unwrap();
+        assert!(!p.poll(false) && p.poll(false));
+        assert_eq!(sent(&mut rx), [ok(&["box2"])]);
+        // an explicit SIGHUP still applies an empty file: it is a valid config
+        std::fs::write(&path, "").unwrap();
+        assert!(p.poll(true));
+        assert_eq!(sent(&mut rx), [ok(&[])]);
     }
 
     #[test]

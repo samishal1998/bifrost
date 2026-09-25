@@ -224,12 +224,18 @@ async fn run(o: Opts, deps: Deps, stop: impl Future<Output = ()> + Send + 'stati
     0
 }
 
-/// Step 4: a missing file ⇒ the empty default, not loaded (A6); anything else goes through `load`.
+/// Step 4: a missing or 0-byte file ⇒ the empty default, not loaded (A6); anything else goes through `load`. A 0-byte
+/// file is a save cut short (a crash mid-`>`), so it never makes adopted mounts removable.
 // ponytail: a missing config runs the empty default (root ~/machines), so a typo in BIFROST_CONFIG silently runs with no machines (warned), and a file that appears later with another mount.root is rejected (A22) and needs a restart; an opt-in --require-config
 fn config(path: &Path) -> Result<(Config, bool), Vec<ConfigError>> {
-    if matches!(std::fs::metadata(path), Err(e) if e.kind() == ErrorKind::NotFound) {
+    let why = match std::fs::metadata(path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => "no config",
+        Ok(m) if m.is_file() && m.len() == 0 => "empty config", // not a pipe: BIFROST_CONFIG=<(…) reads 0 here
+        _ => "",
+    };
+    if !why.is_empty() {
         warn!(
-            "no config at {}: running the empty default until it appears",
+            "{why} at {}: running the empty default until it is written",
             path.display()
         );
         let env = |k: &str| std::env::var(k).ok();
@@ -372,6 +378,17 @@ mod tests {
             assert!(!f.would_enable(t, &Level::INFO), "{t}");
         }
         assert!(f.would_enable("bifrost_discovery::dns", &Level::TRACE));
+    }
+
+    #[test]
+    fn empty_config_file_not_loaded() {
+        let r = rig("emptycfg");
+        let path = r.dir.join("config.toml");
+        assert!(!config(&path).unwrap().1, "missing: default, not loaded");
+        std::fs::write(&path, "").unwrap(); // a crash mid-`>` save: adopted mounts must not become removable
+        assert!(!config(&path).unwrap().1, "0 bytes: default, not loaded");
+        std::fs::write(&path, "\n").unwrap();
+        assert!(config(&path).unwrap().1, "written: loaded");
     }
 
     #[test]
