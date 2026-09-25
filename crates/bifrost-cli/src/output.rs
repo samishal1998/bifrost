@@ -286,7 +286,7 @@ pub fn mount_line(id: &str, m: Option<&MountDto>) -> Option<(String, bool)> {
 }
 
 /// `unmount`'s result once `m` settles: (line, ok). None = still settling.
-/// A Busy failure is final unless `force` (the forced retry waits out the unmount backoff).
+/// A Busy failure is final unless `force` (the request skips the unmount backoff; the forced detach follows).
 pub fn unmount_line(id: &str, m: Option<&MountDto>, force: bool) -> Option<(String, bool)> {
     use Availability as A;
     let busy = bifrost_core::MountError::Busy.to_string(); // the one busy string (C4)

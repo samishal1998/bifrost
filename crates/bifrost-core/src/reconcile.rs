@@ -310,9 +310,11 @@ impl MountRuntime {
         let mount = self.id();
         match s {
             MountState::Healthy => {
-                // A15: only a mount that stayed up for retry_max earns a clean slate
-                if (self.mounted_at)
-                    .is_some_and(|m| now.saturating_duration_since(m) >= t.retry_max)
+                // A15: only a mount that stayed up for retry_max earns a clean slate, and not while a busy unmount
+                // is still being retried (else every tick resets its backoff to bo(1))
+                if self.unmount_retry_at.is_none()
+                    && (self.mounted_at)
+                        .is_some_and(|m| now.saturating_duration_since(m) >= t.retry_max)
                 {
                     self.failures = 0;
                 }
@@ -1558,6 +1560,34 @@ mod tests {
             })
         );
         assert_eq!(rt.failures, 2);
+    }
+
+    /// A15's clean slate waits for a pending unmount retry: a long-up mount held busy (a shell cwd) must keep
+    /// backing off, not be reset to bo(1) by every health tick.
+    #[test]
+    fn busy_unmount_backoff_survives_healthy_probe() {
+        let t0 = Instant::now();
+        let now = t0 + 2 * T.retry_max;
+        let c = cand("a");
+        let mut rt = MountRuntime {
+            mounted_at: Some(t0),
+            ..mounted(&c, Health::Healthy)
+        };
+        let g = rt.begin(Phase::Unmounting);
+        rt.unmount_done(g, Reason::SpecChanged, Err(MountError::Busy), now, &T, 0);
+        rt.health(g, MountState::Healthy, now + bo(1) / 2, &T, 0);
+        assert_eq!(rt.failures, 1);
+        let g = rt.begin(Phase::Unmounting);
+        rt.unmount_done(
+            g,
+            Reason::SpecChanged,
+            Err(MountError::Busy),
+            now + bo(1),
+            &T,
+            0,
+        );
+        assert_eq!(rt.failures, 2);
+        assert_eq!(rt.unmount_retry_at, Some(now + bo(1) + bo(2)));
     }
 
     /// A busy remount whose spec then reverts (DNS flap) is no longer wanted: once its retry time passes, a

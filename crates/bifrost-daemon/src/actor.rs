@@ -740,7 +740,7 @@ impl Actor {
             .map_or_else(|| "not a candidate".into(), |m| m.verdict.to_string())
     }
 
-    /// Adds a persisted hold; `force` asks for a lazy detach (row 3).
+    /// Adds a persisted hold; `force` asks for a lazy detach (row 3). Skips a pending unmount backoff.
     fn api_unmount(&mut self, target: &str, force: bool) -> Result<Vec<String>, ApiError> {
         let ids = self.targets(target)?;
         if ids.is_empty() {
@@ -750,6 +750,7 @@ impl Actor {
             self.held.insert(id.clone());
             if let Some(rt) = self.runtimes.get_mut(id) {
                 rt.force_requested |= force;
+                rt.unmount_retry_at = None; // an explicit request means now, as for mount
             }
         }
         Ok(ids.iter().map(|i| i.as_str().to_string()).collect())
@@ -1734,6 +1735,26 @@ pub(crate) mod tests {
                 >= 3
         );
         assert!(!calls.iter().any(|c| c.contains("force=true")), "{calls:?}");
+    }
+
+    /// `unmount --force` on a mount already waiting out a busy backoff acts now (like `mount`), so the CLI's 60s
+    /// settle can't time out behind a retry_max backoff.
+    #[tokio::test]
+    async fn api_force_unmount_skips_busy_backoff() {
+        let r = rig("forcebusy");
+        let mut h = r.start(r.cfg(SLOW_RETRY, &machine("a")), true, &[], &[]);
+        h.until("mounted", |s| is(s, "a", Availability::Mounted))
+            .await;
+        r.drv.fake.busy.lock().unwrap().insert(id("a"));
+        ok(h.unmount("a", false).await);
+        h.until("busy backoff", |s| {
+            mount(s, "a").is_some_and(|m| m.action.starts_with("waiting (backoff"))
+        })
+        .await;
+        ok(h.unmount("a", true).await);
+        h.until("unmounted", |s| is(s, "a", Availability::Eligible))
+            .await;
+        assert!(r.calls().iter().any(|c| c == "unmount a force=true"));
     }
 
     #[tokio::test]
