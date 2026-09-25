@@ -58,8 +58,7 @@ trap 'echo "FAIL: aborted at ${BASH_SOURCE[0]}:$LINENO: $BASH_COMMAND"' ERR
 
 phases=()
 for f in "${list[@]}"; do
-  # ponytail: a missing listed phase file is skipped, not an error; upgrade: make a missing file fatal once S4 lands (the final gate requires no skip lines)
-  [[ -f tests/e2e/$f.sh ]] || { echo "skip: $f.sh (not present)"; continue; }
+  [[ -f tests/e2e/$f.sh ]] || { echo "FAIL: tests/e2e/$f.sh not found"; exit 1; }
   source "tests/e2e/$f.sh"
   p=${f%%_*}
   declare -F "check_$p" >/dev/null || { echo "FAIL: $f.sh defines no check_$p"; exit 1; }
