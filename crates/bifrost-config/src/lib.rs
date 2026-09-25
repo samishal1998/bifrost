@@ -711,7 +711,12 @@ impl V<'_> {
             let single = entries.len() == 1;
             let mut mounts = Vec::new();
             for (mp, mnt) in entries {
-                let lp = format!("{mp}.local");
+                // the shorthand has no `local` key: its local is the name
+                let lp = if mp == p {
+                    np.clone()
+                } else {
+                    format!("{mp}.local")
+                };
                 let local = match &mnt.local {
                     Some(l) => self.check(&lp, Name::parse(l)),
                     None if single => id.clone(),
@@ -1484,6 +1489,11 @@ local = "b"
             e,
             ["error: machines[1].mounts[0].local: duplicate local \"a\""]
         );
+        // a shorthand has no `local` key: its local is its name
+        let e = errs(
+            "[[machines]]\nname = \"b\"\nhost = \"h\"\n[[machines.mounts]]\nremote = \"~\"\nlocal = \"a\"\n[[machines]]\nname = \"a\"\nhost = \"h\"\nremote = \"~\"\n",
+        );
+        assert_eq!(e, ["error: machines[1].name: duplicate local \"a\""]);
     }
 
     #[test]
