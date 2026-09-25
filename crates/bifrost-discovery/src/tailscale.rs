@@ -7,6 +7,7 @@ use bifrost_core::{
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, btree_map::Entry};
+use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -50,17 +51,29 @@ impl DiscoveryProvider for TailscaleProvider {
     }
 }
 
-/// "tailscale" in an absolute $PATH entry, else the macOS app bundle (a runtime cfg!, so Linux compiles it).
+/// "tailscale" in $PATH, then the fixed dirs, else the macOS app bundle (a runtime cfg!, so Linux compiles it).
 fn which() -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let exe = |p: &PathBuf| {
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    };
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .filter(|d| d.is_absolute())
-        .map(|d| d.join("tailscale"))
-        .find(exe)
+    which_in("tailscale", std::env::var_os("PATH").unwrap_or_default())
         .or_else(|| Some(PathBuf::from(MACOS_APP)).filter(|p| cfg!(target_os = "macos") && exe(p)))
+}
+
+// ponytail: mirrors bifrost_mount::check::{which_in, search_path} (discovery can't depend on mount); one shared crate if a third copy appears
+/// `name` in the absolute entries of `path`, then /usr/local/bin:/usr/bin:/bin (+ /opt/homebrew/bin on macOS):
+/// systemd and launchd start the daemon with a minimal PATH. Tests pass `path` and never call `set_var`.
+fn which_in(name: &str, mut path: OsString) -> Option<PathBuf> {
+    path.push(":/usr/local/bin:/usr/bin:/bin");
+    if cfg!(target_os = "macos") {
+        path.push(":/opt/homebrew/bin");
+    }
+    std::env::split_paths(&path)
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(name))
+        .find(|p| exe(p))
+}
+
+fn exe(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// stdout (≤ 16 MiB) of `<bin> status --json`; a non-zero exit is Failed(tail(stderr, 512)).
@@ -486,6 +499,22 @@ mod tests {
             "{r:?}"
         );
         assert!(t0.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn tailscale_which_falls_back_to_fixed_dirs() {
+        // systemd / launchd: an empty PATH still reaches /usr/local/bin:/usr/bin:/bin
+        let sh = which_in("sh", OsString::new()).unwrap();
+        let fixed = ["/usr/local/bin/sh", "/usr/bin/sh", "/bin/sh"];
+        assert!(fixed.contains(&sh.to_str().unwrap()), "{sh:?}");
+        // $PATH first; relative and missing entries skipped; a non-executable doesn't count
+        let d = tmp();
+        let ts = fake(&d, "tailscale", "exit 0");
+        let path = OsString::from(format!("rel:/nonexistent-bf:{}", d.display()));
+        assert_eq!(which_in("tailscale", path.clone()), Some(ts));
+        std::fs::write(d.join("sh"), "").unwrap();
+        assert_eq!(which_in("sh", path), Some(sh));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

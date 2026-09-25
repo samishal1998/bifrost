@@ -34,6 +34,8 @@ pub struct FakeDriver {
     pub mounted: Mutex<BTreeMap<MountId, MountHandle>>,
     pub states: Mutex<BTreeMap<MountId, MountState>>,
     pub fail_next: Mutex<BTreeSet<MountId>>,
+    /// the next mount of these panics (after recording the call)
+    pub panic_next: Mutex<BTreeSet<MountId>>,
     /// "mount <id>" | "unmount <id> force=<bool>"
     pub calls: Mutex<Vec<String>>,
     /// the on_exit of each successful mount (B12)
@@ -53,6 +55,7 @@ impl FakeDriver {
             mounted: Mutex::default(),
             states: Mutex::default(),
             fail_next: Mutex::default(),
+            panic_next: Mutex::default(),
             calls: Mutex::default(),
             exits: Mutex::default(),
             busy: Mutex::default(),
@@ -64,6 +67,10 @@ impl FakeDriver {
     /// The next mount of `id` fails once.
     pub fn fail_next(&self, id: &str) {
         self.fail_next.lock().unwrap().insert(mount_id(id));
+    }
+    /// The next mount of `id` panics once, synchronously in `mount()` (no lock held).
+    pub fn panic_next(&self, id: &str) {
+        self.panic_next.lock().unwrap().insert(mount_id(id));
     }
     /// Removes and calls that mount's on_exit(detail) (B12). The lock is released before the callback runs.
     pub fn exit(&self, id: &str, detail: &str) {
@@ -90,6 +97,9 @@ impl MountDriver for FakeDriver {
             .lock()
             .unwrap()
             .push(format!("mount {}", id.as_str()));
+        if self.panic_next.lock().unwrap().remove(&id) {
+            panic!("fake: panic_next");
+        }
         let r = if self.fail_next.lock().unwrap().remove(&id) {
             Err(MountError::Failed("fake: fail_next".into()))
         } else {

@@ -19,7 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixListener;
-use tracing::{error, info, warn};
+use tracing::{Level, error, info, warn};
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 fn build_provider(pc: &ProviderConfig) -> Result<Arc<dyn DiscoveryProvider>, String> {
     Ok(match &pc.spec {
@@ -62,11 +66,8 @@ fn main() {
     let level = std::env::var("BIFROST_LOG")
         .ok()
         .and_then(|l| l.parse().ok());
-    tracing_subscriber::fmt()
-        .with_max_level(level.unwrap_or(tracing::Level::INFO))
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
-        .init();
+    let ansi = std::io::stderr().is_terminal();
+    subscriber(level.unwrap_or(Level::INFO), std::io::stderr, ansi).init();
     let deps = Deps {
         drivers: Arc::new(|s: &DriverSettings| bifrost_mount::drivers(s)),
         build_provider: Arc::new(build_provider),
@@ -85,6 +86,27 @@ fn main() {
     };
     // exit without dropping the runtime: a probe thread stuck on a hung FUSE mount must not hold up the exit
     std::process::exit(code);
+}
+
+/// BIFROST_LOG sets the level of bifrost's own targets (`bifrost*`) only. Every other crate (hickory, reqwest, hyper,
+/// rustls, h2, axum, …) is capped at warn, so e.g. hickory's debug dump of raw, untrusted TXT answers never reaches
+/// the log (S3 sign-off 2c).
+fn log_filter(level: Level) -> Targets {
+    Targets::new()
+        .with_default(level.min(Level::WARN))
+        .with_target("bifrost", level)
+}
+
+fn subscriber<W>(level: Level, w: W, ansi: bool) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    let fmt = tracing_subscriber::fmt::layer()
+        .with_writer(w)
+        .with_ansi(ansi);
+    tracing_subscriber::registry()
+        .with(fmt)
+        .with(log_filter(level))
 }
 
 /// SIGTERM / SIGINT.
@@ -316,6 +338,40 @@ mod tests {
 
     fn mode(p: &Path) -> u32 {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn third_party_debug_logs_capped() {
+        let r = rig("log");
+        let path = r.dir.join("log");
+        let file = Arc::new(File::create(&path).unwrap());
+        tracing::subscriber::with_default(subscriber(Level::DEBUG, file, false), || {
+            tracing::debug!(target: "hickory_proto::x", "raw TXT answer");
+            tracing::warn!(target: "hickory_proto::x", "hickory warning");
+            tracing::debug!(target: "bifrost_daemon", "our debug");
+            tracing::debug!("this crate's own target");
+        });
+        let out = std::fs::read_to_string(&path).unwrap();
+        for want in ["hickory warning", "our debug", "this crate's own target"] {
+            assert!(out.contains(want), "{want}: {out}");
+        }
+        assert!(!out.contains("raw TXT answer"), "{out}");
+        // capped, never raised: BIFROST_LOG=error keeps third-party crates at error too
+        let f = log_filter(Level::ERROR);
+        assert!(!f.would_enable("hickory_proto", &Level::WARN));
+        assert!(f.would_enable("reqwest", &Level::ERROR));
+        let f = log_filter(Level::TRACE);
+        for t in [
+            "hickory_resolver",
+            "reqwest",
+            "hyper_util",
+            "rustls",
+            "h2",
+            "axum",
+        ] {
+            assert!(!f.would_enable(t, &Level::INFO), "{t}");
+        }
+        assert!(f.would_enable("bifrost_discovery::dns", &Level::TRACE));
     }
 
     #[test]

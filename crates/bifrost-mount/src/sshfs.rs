@@ -1,6 +1,6 @@
 //! sshfs driver (§6).
 
-use crate::{DriverSettings, Flavor, SSH_OPTS, check};
+use crate::{DriverSettings, Flavor, SSH_OPTS, check, flavor};
 use bifrost_core::{
     BoxFuture, DriverAvailability, MountDriver, MountError, MountHandle, MountRequest, MountSpec,
     MountState, marker,
@@ -81,23 +81,6 @@ pub fn sshfs_argv(spec: &MountSpec, ssh_config: Option<&Path>, f: Flavor) -> Vec
     a
 }
 
-#[cfg(not(target_os = "macos"))]
-fn flavor() -> Option<Flavor> {
-    Some(Flavor::Linux)
-}
-
-#[cfg(target_os = "macos")]
-fn flavor() -> Option<Flavor> {
-    let is = |p: &str| Path::new(p).exists();
-    if is("/Library/Filesystems/macfuse.fs") {
-        Some(Flavor::MacFuse)
-    } else if is("/Library/Application Support/fuse-t") || is("/usr/local/lib/libfuse-t.dylib") {
-        Some(Flavor::FuseT)
-    } else {
-        None
-    }
-}
-
 /// probe() with a caller-chosen search path (B14): tests pass a temp dir, never `set_var`.
 pub(crate) async fn probe_with(path: &OsStr) -> DriverAvailability {
     let no = |w: &str| DriverAvailability::Unavailable(w.into());
@@ -143,9 +126,8 @@ pub(crate) async fn probe_with(path: &OsStr) -> DriverAvailability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{fresh_dir, spec, static1, tmpdir};
+    use crate::tests::{e2e, in_table, req, spec, static1, tidy, tmpdir};
     use bifrost_core::{DriverSelector, marker};
-    use std::path::PathBuf;
 
     fn os(v: &[&str]) -> Vec<OsString> {
         v.iter().map(OsString::from).collect()
@@ -331,85 +313,15 @@ mod tests {
 
     // ---- #[ignore] docker tests: BIFROST_E2E_SSH=host:port:user:ssh_config (tests/e2e/lib.sh start_sshd) ----
 
-    struct E2e {
-        host: String,
-        port: u16,
-        user: String,
-        cfg: PathBuf,
-    }
-
-    fn e2e() -> E2e {
-        let v =
-            std::env::var("BIFROST_E2E_SSH").expect("BIFROST_E2E_SSH=host:port:user:ssh_config");
-        let mut it = v.splitn(4, ':');
-        let mut next = || {
-            it.next()
-                .expect("BIFROST_E2E_SSH=host:port:user:ssh_config")
-                .to_string()
-        };
-        E2e {
-            host: next(),
-            port: next().parse().unwrap(),
-            user: next(),
-            cfg: next().into(),
-        }
-    }
-
-    /// A spec for the docker sshd, mounted under a fresh temp root.
-    fn e2e_spec(id: &str, host: Option<&str>) -> (MountSpec, DriverSettings, PathBuf) {
-        let e = e2e();
-        // not a Tmp: a leftover mount must never meet remove_dir_all
-        let root = fresh_dir(&format!("e2e-{id}")).canonicalize().unwrap();
-        let mut s = spec(
-            id,
-            host.unwrap_or(&e.host),
-            Some(e.port),
-            Some(&e.user),
-            "/home/bf",
-            false,
-        );
-        s.local_path = root.join(id);
-        let set = DriverSettings {
-            ssh_config: Some(e.cfg),
-            vfs_cache_mode: "writes".into(),
-            mount_timeout: Duration::from_secs(15),
-            state_dir: root.clone(),
-        };
-        (s, set, root)
-    }
-
-    fn req(s: &MountSpec, root: &Path) -> (MountRequest, std::sync::mpsc::Receiver<String>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let r = MountRequest {
-            spec: s.clone(),
-            log_path: root.join(format!("{}.log", s.id.as_str())),
-            on_exit: Box::new(move |d| tx.send(d).unwrap()),
-        };
-        (r, rx)
-    }
-
-    /// Non-recursive on purpose: it fails rather than ever deleting through a mount.
-    fn tidy(root: &Path) {
-        for e in std::fs::read_dir(root).unwrap() {
-            let p = e.unwrap().path();
-            let _ = std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir(&p));
-        }
-        std::fs::remove_dir(root).unwrap();
-    }
-
-    fn in_table(p: &Path) -> Option<crate::table::MountEntry> {
-        crate::table::find(&crate::table::read().unwrap(), p).cloned()
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs docker sshd: BIFROST_E2E_SSH"]
     async fn preflight_exit0_and_hostkey_failure() {
-        let (s, set, r1) = e2e_spec("pre", None);
+        let (s, set, r1) = e2e("pre", None);
         let ssh = crate::check::which("ssh").unwrap();
         let cfg = set.ssh_config.as_deref();
         assert_eq!(crate::check::ssh_preflight(&ssh, &s, cfg).await, Ok(()));
         // "localhost" is not in the scratch known_hosts: StrictHostKeyChecking yes + BatchMode → fail
-        let (bad, _, r2) = e2e_spec("pre-bad", Some("localhost"));
+        let (bad, _, r2) = e2e("pre-bad", Some("localhost"));
         match crate::check::ssh_preflight(&ssh, &bad, cfg).await {
             Err(MountError::Failed(m)) => {
                 assert!(m.contains("Host key verification failed"), "{m}")
@@ -417,7 +329,7 @@ mod tests {
             r => panic!("{r:?}"),
         }
         // and the driver refuses to spawn sshfs for it: nothing mounted, error surfaced
-        let (bad, set, root) = e2e_spec("hk", Some("localhost"));
+        let (bad, set, root) = e2e("hk", Some("localhost"));
         let (r, _) = req(&bad, &root);
         match SshfsDriver::new(set).mount(r).await {
             Err(MountError::Failed(m)) => {
@@ -434,7 +346,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs docker sshd: BIFROST_E2E_SSH"]
     async fn sshfs_mount_inspect_unmount() {
-        let (s, set, root) = e2e_spec("m1", None);
+        let (s, set, root) = e2e("m1", None);
         let d = SshfsDriver::new(set);
         assert!(matches!(
             d.probe().await,
@@ -498,7 +410,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs docker sshd: BIFROST_E2E_SSH"]
     async fn sshfs_kill9_auto_unmount_missing() {
-        let (s, set, root) = e2e_spec("k9", None);
+        let (s, set, root) = e2e("k9", None);
         let d = SshfsDriver::new(set);
         let (r, rx) = req(&s, &root);
         let h = d.mount(r).await.unwrap();
