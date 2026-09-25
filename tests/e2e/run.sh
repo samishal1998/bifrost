@@ -9,9 +9,14 @@
 # Every check_<p> runs, in list order, against one daemon. Any FAIL ⇒ exit 1 with the daemon log tail.
 # Everything lives under T=$(mktemp -d): socket, state, config, mount root, keys. ~/.ssh and ~/machines are
 # never touched. Needs bash, docker, jq, curl, pgrep, fusermount3, sshfs, ssh-keygen, ssh-keyscan; python3
-# (p10) and dig (p08). One run at a time: the sshd publishes 127.0.0.1:2222 as container bf-e2e-sshd.
+# (p10) and dig (p08) for `all`. One run at a time (flock /tmp/bf-e2e.lock): the sshd publishes 127.0.0.1:2222
+# as container bf-e2e-sshd.
 set -euo pipefail
 export LC_ALL=C
+# one run at a time, host-wide; before the EXIT trap, so a refused run never cleans up the active run's
+# containers. The daemon and its sshfs children inherit fd 9: a leftover of a SIGKILLed run blocks too.
+exec 9>/tmp/bf-e2e.lock
+flock -n 9 || { echo "another e2e run is active (or its leftovers hold /tmp/bf-e2e.lock)" >&2; exit 2; }
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." # repo root: cargo, and lib.sh's ${CARGO_TARGET_DIR:-$PWD/target}
 
 m1=(p04_sshfs p05_api p06_recovery psec_hostkey p13a_adopt)
@@ -20,9 +25,9 @@ case ${1:-m1} in
   all) list=("${m1[@]}" p07_tailscale p08_dns p09_rclone p10_http p12_reload p13_hardening) ;;
   *) echo "usage: $0 [m1|all]" >&2; exit 2 ;;
 esac
-for t in docker jq curl pgrep fusermount3 sshfs ssh-keygen ssh-keyscan; do
-  command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 2; }
-done
+tools=(docker jq curl pgrep fusermount3 sshfs ssh-keygen ssh-keyscan)
+[[ ${1:-m1} != all ]] || tools+=(python3 dig) # p10's inventory.py, p08's dig
+for t in "${tools[@]}"; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 2; }; done
 
 T=$(realpath "$(mktemp -d)") # realpath: the daemon canonicalizes the root, and paths are compared as text
 export T E2E=$T BIFROST_SOCKET=$T/bf.sock BIFROST_STATE_DIR=$T/state BIFROST_CONFIG=$T/config.toml \

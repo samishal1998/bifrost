@@ -1,7 +1,9 @@
 # p13a (m1): adoption. A daemon restart (kill -9 or SIGTERM) keeps static1's sshfs process and adopts it:
-# same pid, no MountStarted, and no duplicate sshfs process (B6).
+# same pid, no MountStarted, and no duplicate static1 sshfs process (B6).
 
-sshfs_count() { pgrep -xc sshfs || true; } # pgrep -c prints 0 and exits 1 when there is none
+# static1's sshfs only (its mount path is the last argv; -x skips the fusermount3 auto_unmount helper):
+# in `all` mode other sshfs mounts may remount meanwhile. grep -c prints 0 and exits 1 when there is none.
+sshfs_count() { pgrep -xa sshfs | grep -c " $T/machines/static1\$" || true; }
 
 p13a_adopted() { [[ $1 =~ ^[1-9][0-9]*$ ]] && mjq static1 ".adopted and .state == \"mounted\" and .pid == $1"; }
 

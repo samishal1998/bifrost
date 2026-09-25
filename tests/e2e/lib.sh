@@ -4,6 +4,9 @@
 # Binaries come from the shared cargo target dir (P2).
 BF_BIN=${BF_BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug}
 PATH=$BF_BIN:$PATH
+# every CLI call is bounded (mount/unmount poll ≤60s): a wedged daemon gives FAIL + log tail, not a hung gate.
+# `timeout` runs the binary from PATH, so prefix assignments (VAR=x bifrost ...) and exit codes pass through.
+bifrost() { timeout 75 bifrost "$@"; }
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # wait_until SECS CMD... : run CMD every 0.5s until it succeeds; 1 after SECS.
@@ -32,6 +35,7 @@ start_daemon() {
   for v in "$BIFROST_CONFIG" "$BIFROST_STATE_DIR" "$BIFROST_SOCKET"; do
     [[ $v == "$T"/* ]] || { echo "start_daemon: $v is outside \$T" >&2; return 1; }
   done
+  [[ -f $BIFROST_CONFIG ]] || { echo "start_daemon: $BIFROST_CONFIG missing (daemon would default to ~/machines)" >&2; return 1; }
   bifrostd >>"$T/d.log" 2>&1 &
   DPID=$!
   wait_until 10 bifrost daemon status
