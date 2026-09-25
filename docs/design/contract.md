@@ -1908,3 +1908,13 @@ S3 gate:
 3. **For the S4 hardening/README pass:**
    - E2E scratch dirs are kept, one per run, in /tmp, and a p07 scratch dir holds real tailnet names. The README says so.
    - `run.sh` must treat a missing listed phase as fatal once p12 and p13 exist.
+
+## Orchestrator sign-offs (after S4a)
+
+S4a gate: `run.sh all` passed 164/164 twice in a row, with only p07's opt-in skip. `check.sh` is green with 240 tests, and the darwin check is green (commit b46b8d8).
+
+1. **Accepted: SIGHUP wakes the poller thread**, which reads, parses and sends immediately. So one component owns the poll state, and the same bytes are never sent twice.
+2. **Accepted: the log filter is an allowlist.** `BIFROST_LOG` applies only to `bifrost*` targets. Every other target is capped at `min(level, WARN)`, so tokio and axum debug logs no longer appear under `BIFROST_LOG=debug`.
+3. **Accepted: driver, probe, inspect and provider panics are caught** and turned into errors or Degraded, so nothing stays in flight.
+4. **Accepted: drivers show `probing` in the snapshot** until the first probe result arrives.
+5. **Replaces §12's skip rule:** `run.sh` now treats a missing listed phase file as FATAL. The only skip left is p07's opt-in.
