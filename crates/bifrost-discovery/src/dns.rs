@@ -257,11 +257,11 @@ pub fn node_observation(
 /// Every TXT RR of `l`, its character-strings concatenated. Lossy UTF-8: a bad byte then fails the bf1
 /// value grammar, and a non-bf1 record stays ignored.
 fn txts(l: &Lookup) -> Vec<String> {
-    let txt = |r: &RData| match r {
+    let s = |r: &RData| match r {
         RData::TXT(t) => Some(String::from_utf8_lossy(&t.txt_data.concat()).into_owned()),
         _ => None,
     };
-    l.answers().iter().filter_map(|r| txt(&r.data)).collect()
+    l.answers().iter().filter_map(|r| s(&r.data)).collect()
 }
 
 /// The union of `nodes=` over the valid bf1 index RRs: sorted, deduplicated, at most MAX_NODES.
