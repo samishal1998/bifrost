@@ -389,7 +389,7 @@ Set `NO_COLOR` for a colourless UI: the glyphs (● ◐ ◌ ○ ✕) still show 
 | Local paths: no traversal or collisions | Ids are single lowercase path components. Static locals win and conflicts are reported. Symlinks, files, non-empty or occupied mount points are refused. The root can't be `/` or `$HOME` |
 | Local API | A 0600 Unix socket, 0700 directories it creates, a lock against a second daemon, never under `/tmp` by default |
 
-**Host keys are never weakened.** Bifröst passes exactly these ssh options, to sshfs, to rclone's `--sftp-ssh`
+**Host keys are never weakened.** Bifröst passes these ssh options, to sshfs, to rclone's `--sftp-ssh`
 and to the preflight:
 
 ```
@@ -398,7 +398,9 @@ BatchMode=yes ConnectTimeout=10 ServerAliveInterval=15 ServerAliveCountMax=3 Con
 
 Nothing in that list touches `StrictHostKeyChecking`, `UserKnownHostsFile` or `ProxyCommand`, and no config knob
 can. Your `~/.ssh/config`, or `mount.ssh_config` passed as `-F`, decides trust. `BatchMode=yes` turns "ask" into
-"fail".
+"fail". The preflight and `--sftp-ssh` also pass `-a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no` (sshfs
+does the same by itself), so a `ForwardAgent`, `ForwardX11` or port forward in your ssh_config never reaches a mounted
+host: the agent is only used to log in.
 
 Before every mount an `ssh -s <host> sftp` preflight runs. Its stderr is shown as the mount's `last_error`.
 

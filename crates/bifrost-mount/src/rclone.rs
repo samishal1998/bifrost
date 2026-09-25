@@ -3,7 +3,7 @@
 //! OpenSSH, with the same SSH_OPTS, ssh_config and known_hosts as sshfs. Spawn, readiness, inspect and
 //! unmount are the shared lib.rs code.
 
-use crate::{DriverSettings, Flavor, SSH_OPTS, check, flavor};
+use crate::{DriverSettings, Flavor, SSH_CLI_HARDENING, SSH_OPTS, check, flavor};
 use bifrost_core::{
     BoxFuture, DriverAvailability, MountDriver, MountError, MountHandle, MountRequest, MountSpec,
     MountState, marker,
@@ -170,6 +170,7 @@ pub fn rclone_argv(
 ) -> Vec<OsString> {
     // one space-separated value; the mount driver refuses unclean tokens (sftp_ssh_check)
     let mut cmd = vec![ssh.to_string_lossy().into_owned()];
+    cmd.extend(SSH_CLI_HARDENING.iter().map(|s| s.to_string()));
     cmd.extend(SSH_OPTS.iter().flat_map(|o| ["-o".into(), o.to_string()]));
     if let Some(c) = ssh_config {
         cmd.extend(["-F".into(), format!("\"{}\"", c.to_string_lossy())]);
@@ -227,7 +228,7 @@ mod tests {
         v.iter().map(OsString::from).collect()
     }
 
-    const SSH: &str = "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
+    const SSH: &str = "/usr/bin/ssh -a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
                        -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none";
     const FLAVORS: [Flavor; 3] = [Flavor::Linux, Flavor::MacFuse, Flavor::FuseT];
 

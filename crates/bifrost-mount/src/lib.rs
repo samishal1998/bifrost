@@ -48,6 +48,17 @@ pub const SSH_OPTS: [&str; 6] = [
     "ControlPath=none",
 ];
 
+/// ssh's own flags for the preflight and `--sftp-ssh` (sshfs adds `-x -a -oClearAllForwardings=yes` itself, and its `-o`
+/// passthrough rejects these): no agent, X11 or port forwarding from ssh_config ever reaches a mounted host, as sftp/scp do.
+pub const SSH_CLI_HARDENING: [&str; 6] = [
+    "-a",
+    "-x",
+    "-o",
+    "ClearAllForwardings=yes",
+    "-o",
+    "PermitLocalCommand=no",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flavor {
     Linux,
@@ -75,9 +86,8 @@ pub(crate) fn flavor() -> Option<Flavor> {
 
 /// pure
 pub fn preflight_argv(spec: &MountSpec, ssh_config: Option<&Path>) -> Vec<OsString> {
-    let mut a: Vec<OsString> = SSH_OPTS
-        .iter()
-        .flat_map(|o| ["-o", o])
+    let mut a: Vec<OsString> = (SSH_CLI_HARDENING.iter().copied())
+        .chain(SSH_OPTS.iter().flat_map(|o| ["-o", o]))
         .map(Into::into)
         .collect();
     if let Some(c) = ssh_config {
@@ -272,7 +282,12 @@ pub(crate) async fn mount_with(
     req: MountRequest,
     s: &DriverSettings,
 ) -> Result<MountHandle, MountError> {
-    let spec = &req.spec;
+    let MountRequest {
+        spec,
+        log_path,
+        on_exit,
+    } = req;
+    let spec = &spec;
     let local = &spec.local_path;
     let fp = spec.fingerprint();
     let handle = |pid| MountHandle {
@@ -299,77 +314,84 @@ pub(crate) async fn mount_with(
         Step2::Detach => unmount_path(local, true).await?,
         Step2::Refused(why) => return Err(MountError::Refused(why)),
     }
-    // 3–4
+    // 3–6; a failed attempt removes the mountpoint again, only once the table says it is none (§6)
+    // ponytail: an attempt dropped whole by the actor's outer timeout keeps its empty dir until the next attempt for that id; upgrade: a Drop guard once a dropped attempt's child can no longer mount there
     prepare_mountpoint(local)?;
-    check::ssh_preflight(ssh, spec, s.ssh_config.as_deref()).await?;
-    // 5. spawn: never a pipe (a full pipe stalls FUSE; a dead reader SIGPIPEs the orphan)
-    // ponytail: the child log is truncated at each spawn, no rotation or size cap; cap it on the health tick
-    let log = {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&req.log_path)
-            .map_err(|e| MountError::Failed(format!("log {}: {e}", req.log_path.display())))?;
-        let cmd: Vec<_> = std::iter::once(bin.as_os_str())
-            .chain(argv.iter().map(OsString::as_os_str))
-            .map(OsStr::to_string_lossy)
-            .collect();
-        writeln!(f, "{LOG_HEADER}{}", cmd.join(" "))
-            .map_err(|e| MountError::Failed(format!("log: {e}")))?;
-        f
-    };
-    let io = |e: std::io::Error| MountError::Failed(format!("spawn {}: {e}", bin.display()));
-    let mut child = tokio::process::Command::new(bin)
-        .args(&argv)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone().map_err(io)?)
-        .stderr(log)
-        .process_group(0) // a terminal ^C or the daemon's death never signals it
-        .kill_on_drop(false)
-        .spawn()
-        .map_err(io)?;
-    // 6. readiness
-    let mark = marker(&spec.id, &fp);
-    let ours = || {
-        let t = table::read().unwrap_or_default();
-        // macOS: FUSE-T/NFS may not show the marker; step 2 made sure nothing else was there
-        table::find(&t, local).is_some_and(|e| !cfg!(target_os = "linux") || e.source == mark)
-    };
-    let deadline = tokio::time::Instant::now() + s.mount_timeout;
-    loop {
-        if ours() {
-            let pid = child.id();
-            let on_exit = req.on_exit;
-            tokio::spawn(async move {
-                let st = child.wait().await; // reaps it; no kill channel
-                on_exit(st.map_or_else(|e| e.to_string(), |s| s.to_string()));
-            });
-            return Ok(handle(pid));
-        }
-        if let Ok(Some(st)) = child.try_wait() {
-            return Err(MountError::Failed(format!(
-                "{driver} {st}: {}",
-                log_tail(&req.log_path)
-            )));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            // ponytail: this timed-out spawn of ours is the only process ever signalled, no orphan scan (one stuck in connect lives until ConnectTimeout; a lazily detached sshfs lingers until its last reference closes); none (deliberate: killing loses data)
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+    let r: Result<MountHandle, MountError> = async {
+        check::ssh_preflight(ssh, spec, s.ssh_config.as_deref()).await?;
+        // 5. spawn: never a pipe (a full pipe stalls FUSE; a dead reader SIGPIPEs the orphan)
+        // ponytail: the child log is truncated at each spawn, no rotation or size cap; cap it on the health tick
+        let log = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(&log_path)
+                .map_err(|e| MountError::Failed(format!("log {}: {e}", log_path.display())))?;
+            let cmd: Vec<_> = std::iter::once(bin.as_os_str())
+                .chain(argv.iter().map(OsString::as_os_str))
+                .map(OsStr::to_string_lossy)
+                .collect();
+            writeln!(f, "{LOG_HEADER}{}", cmd.join(" "))
+                .map_err(|e| MountError::Failed(format!("log: {e}")))?;
+            f
+        };
+        let io = |e: std::io::Error| MountError::Failed(format!("spawn {}: {e}", bin.display()));
+        let mut child = tokio::process::Command::new(bin)
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().map_err(io)?)
+            .stderr(log)
+            .process_group(0) // a terminal ^C or the daemon's death never signals it
+            .kill_on_drop(false)
+            .spawn()
+            .map_err(io)?;
+        // 6. readiness
+        let mark = marker(&spec.id, &fp);
+        let ours = || {
+            let t = table::read().unwrap_or_default();
+            // macOS: FUSE-T/NFS may not show the marker; step 2 made sure nothing else was there
+            table::find(&t, local).is_some_and(|e| !cfg!(target_os = "linux") || e.source == mark)
+        };
+        let deadline = tokio::time::Instant::now() + s.mount_timeout;
+        loop {
             if ours() {
-                let _ = unmount_path(local, true).await;
+                let pid = child.id();
+                tokio::spawn(async move {
+                    let st = child.wait().await; // reaps it; no kill channel
+                    on_exit(st.map_or_else(|e| e.to_string(), |s| s.to_string()));
+                });
+                return Ok(handle(pid));
             }
-            return Err(MountError::Failed(format!(
-                "timed out after {}s: {}",
-                s.mount_timeout.as_secs(),
-                log_tail(&req.log_path)
-            )));
+            if let Ok(Some(st)) = child.try_wait() {
+                return Err(MountError::Failed(format!(
+                    "{driver} {st}: {}",
+                    log_tail(&log_path)
+                )));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // ponytail: this timed-out spawn of ours is the only process ever signalled, no orphan scan (one stuck in connect lives until ConnectTimeout; a lazily detached sshfs lingers until its last reference closes); none (deliberate: killing loses data)
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                if ours() {
+                    let _ = unmount_path(local, true).await;
+                }
+                return Err(MountError::Failed(format!(
+                    "timed out after {}s: {}",
+                    s.mount_timeout.as_secs(),
+                    log_tail(&log_path)
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    .await;
+    if r.is_err() && table::read().is_ok_and(|t| table::find(&t, local).is_none()) {
+        let _ = std::fs::remove_dir(local);
+    }
+    r
 }
 
 /// inspect() for any driver: our entry at the path (Linux: carrying the marker) → liveness, else Missing.
@@ -534,6 +556,12 @@ pub(crate) mod tests {
         assert_eq!(
             preflight_argv(&static1(), Some(cfg)),
             os(&[
+                "-a",
+                "-x",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-o",
+                "PermitLocalCommand=no",
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -562,6 +590,12 @@ pub(crate) mod tests {
         assert_eq!(
             preflight_argv(&v6, None),
             os(&[
+                "-a",
+                "-x",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-o",
+                "PermitLocalCommand=no",
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -623,6 +657,83 @@ pub(crate) mod tests {
             for bad in FORBIDDEN {
                 assert!(!joined.contains(bad), "{bad} in {joined}");
             }
+        }
+    }
+
+    #[test]
+    fn ssh_never_forwards_agent_x11_or_ports() {
+        // sshfs passes -x -a -oClearAllForwardings=yes itself; the preflight and --sftp-ssh must too
+        let cfg = Path::new("/tmp/e2e/ssh_config");
+        for s in all_specs() {
+            for c in [None, Some(cfg)] {
+                let str = |a: Vec<OsString>| -> Vec<String> {
+                    a.iter().map(|x| x.to_string_lossy().into_owned()).collect()
+                };
+                let mut argvs = vec![str(preflight_argv(&s, c))];
+                for nfs in [false, true] {
+                    let ssh = Path::new("/usr/bin/ssh");
+                    let a = str(rclone_argv(
+                        &s,
+                        ssh,
+                        c,
+                        "writes",
+                        Path::new("/c"),
+                        nfs,
+                        Flavor::Linux,
+                    ));
+                    let v = a
+                        .iter()
+                        .find_map(|x| x.strip_prefix("--sftp-ssh="))
+                        .unwrap();
+                    argvs.push(v.split(' ').map(String::from).collect());
+                }
+                for a in argvs {
+                    for t in [
+                        "-a",
+                        "-x",
+                        "ClearAllForwardings=yes",
+                        "PermitLocalCommand=no",
+                    ] {
+                        assert!(a.iter().any(|x| x == t), "{t} missing: {a:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_mount_leaves_no_mountpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("failed-mount");
+        let root = d.canonicalize().unwrap();
+        let fake = |name: &str, body: &str| {
+            let p = root.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let denied = fake(
+            "denied",
+            "echo 'Host key verification failed.' >&2; exit 255",
+        );
+        let ok = fake("ok", "exit 0");
+        // ETXTBSY: a child forked by another test thread during a write holds the fd until it execs
+        std::thread::sleep(Duration::from_millis(200));
+        let mut s = static1();
+        s.local_path = root.join("static1");
+        let set = DriverSettings {
+            ssh_config: None,
+            vfs_cache_mode: "writes".into(),
+            mount_timeout: Duration::from_secs(5),
+            state_dir: root.clone(),
+        };
+        let bin = check::which("false").unwrap();
+        // the preflight fails, then the child exits before mounting
+        for ssh in [denied, ok] {
+            let (r, _rx) = req(&s, &root);
+            let e = mount_with("sshfs", &bin, &ssh, vec![], r, &set).await;
+            assert!(matches!(e, Err(MountError::Failed(_))), "{e:?}");
+            assert!(!s.local_path.exists(), "{ssh:?}");
         }
     }
 

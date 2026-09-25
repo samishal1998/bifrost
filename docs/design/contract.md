@@ -983,6 +983,7 @@ pub mod check {
 }
 pub const SSH_OPTS: [&str; 6] = ["BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15",
                                  "ServerAliveCountMax=3", "ControlMaster=no", "ControlPath=none"];
+pub const SSH_CLI_HARDENING: [&str; 6] = ["-a", "-x", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no"]; // preflight + --sftp-ssh
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum Flavor { Linux, MacFuse, FuseT }
 pub fn sshfs_argv(spec: &MountSpec, ssh_config: Option<&Path>, f: Flavor) -> Vec<OsString>;             // pure
 pub fn rclone_argv(spec: &MountSpec, ssh: &Path, ssh_config: Option<&Path>, vfs: &str, cache_dir: &Path,
@@ -995,12 +996,13 @@ pub async fn unmount_path(path: &Path, force: bool) -> Result<(), MountError>;
 pub fn adopt(entries: &[table::MountEntry], root: &Path, records: &BTreeMap<MountId, MountHandle>) -> Vec<MountHandle>;
 ```
 
-**Host keys are never weakened.** `SSH_OPTS` is the only set of ssh options Bifröst ever passes. It never contains StrictHostKeyChecking, UserKnownHostsFile, GlobalKnownHostsFile, ProxyCommand or IdentityFile, and no argv ever carries sshfs's `sftp_server` (it takes a remote command, B13). The user's ssh_config (or the `-F` file) decides trust, and `BatchMode=yes` turns "ask" into "fail". `ControlPath=none` ties the mount's lifetime to our process rather than to a user's multiplexing master. Test: `argv_never_weakens_host_keys`, a scan of every argv builder for those substrings plus `sftp_server`. S1 agent C writes it while `rclone_argv` is still the `vec![]` stub; S3 agent J extends it to real rclone argv (B13).
+**Host keys are never weakened.** `SSH_OPTS` and `SSH_CLI_HARDENING` are the only ssh options Bifröst ever passes. They never contain StrictHostKeyChecking, UserKnownHostsFile, GlobalKnownHostsFile, ProxyCommand or IdentityFile, and no argv ever carries sshfs's `sftp_server` (it takes a remote command, B13). The user's ssh_config (or the `-F` file) decides trust, and `BatchMode=yes` turns "ask" into "fail". `ControlPath=none` ties the mount's lifetime to our process rather than to a user's multiplexing master. `SSH_CLI_HARDENING` (`-a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no`, as OpenSSH's sftp/scp pass) goes first in the preflight and `--sftp-ssh`, so agent, X11 and port forwarding from ssh_config never reach a mounted host; sshfs passes `-x -a -oClearAllForwardings=yes` itself, and its `-o` passthrough rejects these, so they stay out of `SSH_OPTS` (test `ssh_never_forwards_agent_x11_or_ports`). Test: `argv_never_weakens_host_keys`, a scan of every argv builder for those substrings plus `sftp_server`. S1 agent C writes it while `rclone_argv` is still the `vec![]` stub; S3 agent J extends it to real rclone argv (B13).
 
 **SSH preflight**, run before every spawn for both drivers (PRD §8.1 "validate SSH connectivity"):
 
 ```
-<ssh> -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+<ssh> -a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no
+      -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
       -o ControlMaster=no -o ControlPath=none [-F <ssh_config>] [-p <port>] [-l <user>] -s -- <host> sftp
 stdin=/dev/null, stdout=/dev/null, stderr piped; timeout 15s
 exit 0 ⇒ host key + auth + sftp subsystem OK;  else Err(Failed(tail(stderr, 512)))   (A8)
@@ -1037,6 +1039,7 @@ This matters because rclone swallows ssh's stderr. **Unverified here:** that ssh
    - the mount table has `local_path` (on Linux also `source == marker(id, fp)`; if S1 finds that sshfs ignores a user `fsname=`, path + fstype instead, A10) → `Ok(MountHandle{pid: child.id()})` and start the supervisor;
    - the child has exited → `Err(Failed(status + tail(last 2 KiB of the log, 512)))` (A8);
    - the deadline passed → `start_kill()` and `wait()` (this is the only kill, and it hits our own child that never finished mounting), then lazily unmount **only if** the entry at the path carries our marker, or in the A10 fallback has this driver's fstype (A9), then `Err(Failed("timed out after 30s: <tail>"))`.
+   - any failure in steps 4–6 then `remove_dir(local_path)` once the table shows no mount there (only an empty dir, never recursive), so failed attempts leave no directories behind.
    - macOS permission hint (B7): when the log tail matches `kernel extension|System Extension|not permitted`, the error gets the suffix " (macOS: allow the macFUSE system extension in System Settings → Privacy & Security)". This lives in the shared spawn/readiness code in `mount/src/lib.rs` (S1-C), so rclone gets it too; `bifrost doctor` shows the same hint (S2-F) and the README documents it (S4-N).
 
 **sshfs argv.** Options come first and the validated positionals last. Neither positional can start with `-`: the host grammar forbids it and the local path is absolute.
@@ -1061,7 +1064,7 @@ Example: `sshfs -f -o fsname=bifrost:static1@9f1c2e0a7b3d4c55,reconnect,idmap=us
 <rclone> mount|nfsmount :sftp:<sftp_path> <local_path>
   --config=/dev/null                             # never read the user's rclone.conf
   --sftp-host=<host>                             # harmless with --sftp-ssh; avoids a possible "host not set"
-  "--sftp-ssh=<ssh> -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+  "--sftp-ssh=<ssh> -a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
                -o ControlMaster=no -o ControlPath=none [-F \"<ssh_config>\"] [-p <port>] [-l <user>] <host>"
   --sftp-shell-type=none --sftp-disable-hashcheck   # rclone never runs remote shell commands
   --devname=bifrost:<id>@<fp16>
@@ -1918,3 +1921,4 @@ S4a gate: `run.sh all` passed 164/164 twice in a row, with only p07's opt-in ski
 3. **Accepted: driver, probe, inspect and provider panics are caught** and turned into errors or Degraded, so nothing stays in flight.
 4. **Accepted: drivers show `probing` in the snapshot** until the first probe result arrives.
 5. **Replaces §12's skip rule:** `run.sh` now treats a missing listed phase file as FATAL. The only skip left is p07's opt-in.
+6. **Final review r1 (bifrost-mount):** the preflight and `--sftp-ssh` now start with `SSH_CLI_HARDENING` (`-a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no`), so a `ForwardAgent`/`ForwardX11`/`RemoteForward` in the user's ssh_config never reaches a mounted host (sshfs already did this). A failed `mount()` (steps 4–6) now removes `<root>/<id>` when the table shows no mount there; this also removes a user-precreated empty dir, as the post-unmount cleanup does.
