@@ -25,7 +25,13 @@ mpid() { bifrost --json mounts | jq -r --arg id "$1" '.[] | select(.id == $id) |
 is_mounted() { awk -v p="$1" '$5 == p { f = 1 } END { exit !f }' /proc/self/mountinfo; }
 
 # start_daemon : bifrostd in the background (log appended to $T/d.log), waits until it answers.
+# Refuses unless config, state and socket all live under $T: never the user's real config or ~/machines.
 start_daemon() {
+  : "${T:?}" "${BIFROST_CONFIG:?must point under \$T}" "${BIFROST_STATE_DIR:?}" "${BIFROST_SOCKET:?}"
+  local v
+  for v in "$BIFROST_CONFIG" "$BIFROST_STATE_DIR" "$BIFROST_SOCKET"; do
+    [[ $v == "$T"/* ]] || { echo "start_daemon: $v is outside \$T" >&2; return 1; }
+  done
   bifrostd >>"$T/d.log" 2>&1 &
   DPID=$!
   wait_until 10 bifrost daemon status

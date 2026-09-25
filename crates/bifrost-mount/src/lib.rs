@@ -127,17 +127,23 @@ pub async fn unmount_path(path: &Path, force: bool) -> Result<(), MountError> {
             return Ok(());
         }
     }
-    if !force && why.contains("busy") {
-        return Err(MountError::Busy); // "Device or resource busy" (fusermount3), "Resource busy" (macOS)
+    if !force && busy(&why) {
+        return Err(MountError::Busy);
     }
     Err(MountError::Failed(format!("still mounted: {why}")))
 }
 
+/// The errno text, never the bare word: stderr carries the path, and a root or id may contain "busy".
+fn busy(why: &str) -> bool {
+    // "Device or resource busy" (fusermount3), "Resource busy" (macOS umount)
+    why.to_ascii_lowercase().contains("resource busy")
+}
+
 /// Pure. Only entries whose parent == root. Marker source ⇒ adopt (driver from fstype, else record, else "sshfs");
-/// no marker ⇒ adopt only when state.json has a record with the same local_path (macOS NFS fallback); else foreign.
+/// no marker ⇒ on macOS only, adopt when state.json has a record with the same local_path (NFS fallback); else foreign.
 /// `pid` comes from the state record with the same local_path, else None (B15).
 // ponytail: only mounts directly under the current root are adopted, old-root mounts are left alone after a root change; unmount any marker mount outside the root at startup
-// ponytail: an unmarked entry is trusted on a state.json record and an unknown fstype guesses "sshfs" (inspect/unmount are shared, so harmless); read the NFS source to tell drivers apart
+// ponytail: on macOS only, an unmarked entry is trusted on a state.json record (Linux fsname markers always work, so there it is foreign), and an unknown fstype guesses "sshfs" (inspect/unmount are shared, so harmless); read the NFS source to tell drivers apart
 pub fn adopt(
     entries: &[table::MountEntry],
     root: &Path,
@@ -154,7 +160,7 @@ pub fn adopt(
         .filter_map(|e| {
             let rec = records.values().find(|r| r.local_path == e.mount_point);
             let Some((id, fingerprint)) = parse_marker(&e.source) else {
-                return rec.cloned();
+                return rec.filter(|_| cfg!(target_os = "macos")).cloned();
             };
             let driver = match e.fstype.as_str() {
                 "fuse.sshfs" => "sshfs".into(),
@@ -190,10 +196,10 @@ pub(crate) fn step2(entries: &[table::MountEntry], spec: &MountSpec) -> Step2 {
     match parse_marker(&e.source) {
         Some((id, fp)) if id == spec.id && fp == spec.fingerprint() => Step2::Adopt,
         Some((id, _)) if id == spec.id => Step2::Detach,
-        _ => Step2::Refused(format!(
-            "occupied by {} {}",
-            e.fstype,
-            clean(&e.source, 256)
+        // the fstype subtype is chosen by whoever mounted it: clean it with the source
+        _ => Step2::Refused(clean(
+            &format!("occupied by {} {}", e.fstype, e.source),
+            512,
         )),
     }
 }
@@ -619,6 +625,10 @@ pub(crate) mod tests {
                 h("c", "rclone-nfs", "cccccccccccccccc", Some(7)),
                 h("e", "sshfs", fa, None),
             ]
+            .into_iter()
+            // an unmarked entry is ours only on macOS (NFS has no fsname marker); elsewhere it is foreign
+            .filter(|x| cfg!(target_os = "macos") || x.id.as_str() != "c")
+            .collect::<Vec<_>>()
         );
         // driver falls back to the record when the fstype says nothing
         let mut r2 = BTreeMap::new();
@@ -667,6 +677,11 @@ pub(crate) mod tests {
             };
             assert!(why.contains(&f.fstype) && why.contains(&f.source), "{why}");
         }
+        // the fstype subtype is chosen by whoever mounted it: cleaned like the source (§11 #7)
+        let Step2::Refused(why) = step2(&[entry(p, "fuse.\u{1b}[31m", "x\u{9b}y")], &s) else {
+            panic!("not refused")
+        };
+        assert!(!why.chars().any(|c| c.is_control()), "{why:?}");
         // only the topmost entry counts
         assert_eq!(
             step2(&[entry(p, "ext4", "/dev/sdb1"), same], &s),
@@ -704,6 +719,22 @@ pub(crate) mod tests {
             }
         }
         assert!(d.join("full/.hidden").exists());
+    }
+
+    #[test]
+    fn busy_matches_the_errno_text_not_the_path() {
+        assert!(busy(
+            "fusermount3: failed to unmount /r/machines/x: Device or resource busy"
+        ));
+        assert!(busy(
+            "umount(/r/machines/x): Resource busy -- try 'diskutil unmount'"
+        ));
+        assert!(!busy(
+            "fusermount3: entry for /home/busybee/machines/busy-box not found in /etc/mtab"
+        ));
+        assert!(!busy(
+            "fusermount3: failed to unmount /home/busybee/machines/x: Invalid argument"
+        ));
     }
 
     #[tokio::test]

@@ -119,24 +119,46 @@ pub async fn run(
 }
 
 /// exit 0 ⇒ host key + auth + sftp subsystem OK (verified against OpenSSH 9.6 → Alpine sshd).
+/// The channel data comes from the peer: stdout → /dev/null, stderr read up to 64 KiB (not `run`, which buffers all).
 pub async fn ssh_preflight(
     ssh: &Path,
     spec: &MountSpec,
     ssh_config: Option<&Path>,
 ) -> Result<(), MountError> {
-    let argv = crate::preflight_argv(spec, ssh_config);
-    let out = run(ssh, &argv, Duration::from_secs(15))
-        .await
-        .map_err(|e| MountError::Failed(format!("ssh preflight: {e}")))?;
-    if out.status.success() {
+    use tokio::io::AsyncReadExt;
+    let fail = |e: &dyn std::fmt::Display| MountError::Failed(format!("ssh preflight: {e}"));
+    let mut child = tokio::process::Command::new(ssh)
+        .args(crate::preflight_argv(spec, ssh_config))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| fail(&e))?;
+    let stderr = child.stderr.take();
+    // the reader is dropped at the cap: a flooding peer gets EPIPE instead of our heap
+    let read = async move {
+        let mut buf = Vec::new();
+        if let Some(e) = stderr {
+            let _ = e.take(64 * 1024).read_to_end(&mut buf).await;
+        }
+        buf
+    };
+    let (buf, status) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(read, child.wait())
+    })
+    .await
+    .map_err(|_| fail(&"timed out"))?;
+    let status = status.map_err(|e| fail(&e))?;
+    if status.success() {
         return Ok(());
     }
-    let why = tail(&String::from_utf8_lossy(&out.stderr), 512);
-    Err(MountError::Failed(if why.is_empty() {
-        format!("ssh preflight: {}", out.status)
+    let why = tail(&String::from_utf8_lossy(&buf), 512);
+    Err(if why.is_empty() {
+        fail(&status)
     } else {
-        why
-    }))
+        MountError::Failed(why)
+    })
 }
 
 #[cfg(test)]
@@ -211,6 +233,40 @@ mod tests {
         assert_eq!(liveness(&tmpdir("live")).await, MountState::Healthy);
         let gone = tmpdir("live-gone").join("nope");
         assert_eq!(liveness(&gone).await, MountState::Healthy); // NotFound is a reply (A17)
+    }
+
+    #[tokio::test]
+    async fn preflight_stdout_ignored_stderr_capped() {
+        let d = tmpdir("preflight");
+        let s = crate::tests::static1();
+        let fake = |name: &str, body: &str| {
+            let p = d.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let ok = fake("ok", "echo noise; exit 0");
+        let denied = fake(
+            "denied",
+            "echo 'bf@h: Permission denied (publickey).' >&2; exit 255",
+        );
+        let flood = fake("flood", "exec yes flood >&2");
+        // ETXTBSY: a child forked by another test thread during a write holds the fd until it execs
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(ssh_preflight(&ok, &s, None).await, Ok(()));
+        assert_eq!(
+            ssh_preflight(&denied, &s, None).await,
+            Err(MountError::Failed(
+                "bf@h: Permission denied (publickey).".into()
+            ))
+        );
+        // a peer flooding stderr: cut at 64 KiB, the writer gets EPIPE, no 15s of buffering
+        let t0 = Instant::now();
+        let Err(MountError::Failed(why)) = ssh_preflight(&flood, &s, None).await else {
+            panic!("flood passed")
+        };
+        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+        assert!(why.len() <= 512 && why.starts_with("flood"), "{why}");
     }
 
     #[tokio::test]

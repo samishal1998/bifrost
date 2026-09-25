@@ -105,9 +105,10 @@ pub(crate) async fn probe_with(path: &OsStr) -> DriverAvailability {
         return no("sshfs not found");
     };
     let out = check::run(&bin, &["--version".into()], Duration::from_secs(5)).await;
-    let text = out
-        .map(|o| [o.stdout, o.stderr].concat())
-        .unwrap_or_default();
+    let text = match out {
+        Ok(o) => [o.stdout, o.stderr].concat(),
+        Err(e) => return no(&format!("sshfs --version: {e}")),
+    };
     let text = String::from_utf8_lossy(&text);
     let Some(version) = text.lines().find(|l| l.contains("SSHFS version")) else {
         return no("sshfs --version: not SSHFS");
@@ -315,6 +316,17 @@ mod tests {
             panic!("available without ssh")
         };
         assert!(why.contains("ssh"), "{why}");
+        // sshfs that fails to run (EACCES: exec bit for group only) is reported as such, not as "not SSHFS"
+        use std::os::unix::fs::PermissionsExt;
+        script(&d, "ssh", "exit 0");
+        std::fs::set_permissions(d.join("sshfs"), std::fs::Permissions::from_mode(0o654)).unwrap();
+        let DriverAvailability::Unavailable(why) = probe_with(d.as_os_str()).await else {
+            panic!("available with an unrunnable sshfs")
+        };
+        assert!(
+            why.starts_with("sshfs --version: ") && !why.contains("not SSHFS"),
+            "{why}"
+        );
     }
 
     // ---- #[ignore] docker tests: BIFROST_E2E_SSH=host:port:user:ssh_config (tests/e2e/lib.sh start_sshd) ----
