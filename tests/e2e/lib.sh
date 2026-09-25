@@ -41,6 +41,9 @@ start_daemon() {
 stop_daemon() {
   [[ -n ${DPID:-} ]] || return 0
   kill -TERM "$DPID" 2>/dev/null || true
+  local i # bounded: a daemon that ignores SIGTERM gets SIGKILL after 20s instead of hanging the run
+  for ((i = 0; i < 40; i++)); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.5; done
+  kill -KILL "$DPID" 2>/dev/null || true
   wait "$DPID" 2>/dev/null || true
   DPID=
 }

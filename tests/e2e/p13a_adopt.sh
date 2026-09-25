@@ -3,7 +3,7 @@
 
 sshfs_count() { pgrep -xc sshfs || true; } # pgrep -c prints 0 and exits 1 when there is none
 
-p13a_adopted() { mjq static1 ".adopted and .state == \"mounted\" and .pid == $1"; } # $1: a pid from mpid
+p13a_adopted() { [[ $1 =~ ^[1-9][0-9]*$ ]] && mjq static1 ".adopted and .state == \"mounted\" and .pid == $1"; }
 
 # p13a_restarted HOW PID N : checks after a restart; PID = static1's pid, N = the sshfs count, both from before.
 p13a_restarted() {
