@@ -538,7 +538,13 @@ pub(crate) mod tests {
                     argvs.push(sshfs_argv(&s, c, f));
                     for nfs in [false, true] {
                         let ssh = Path::new("/usr/bin/ssh");
-                        argvs.push(rclone_argv(&s, ssh, c, "writes", Path::new("/c"), nfs, f));
+                        let a = rclone_argv(&s, ssh, c, "writes", Path::new("/c"), nfs, f);
+                        // B13 (S3-J): the real rclone argv, not the S0 vec![] stub
+                        let real = a
+                            .iter()
+                            .any(|x| x.to_string_lossy().starts_with("--sftp-ssh="));
+                        assert!(real, "{a:?}");
+                        argvs.push(a);
                     }
                 }
             }
