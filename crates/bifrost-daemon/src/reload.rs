@@ -1,7 +1,7 @@
 //! Config file poller (contract §8 Config hot reload, B10): produces `Msg::Config` only; applying it is the actor's (A4).
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{RecvTimeoutError, channel};
+use std::sync::mpsc::channel;
 use std::time::Duration;
 
 use bifrost_config::ConfigError;
@@ -18,6 +18,20 @@ const EVERY: Duration = Duration::from_secs(2);
 // ponytail: polls every 2s instead of notify, so an edit applies after 2–4s (SIGHUP and POST /v1/config/reload are instant); notify 8.x if latency matters
 pub fn spawn_poller(path: PathBuf, tx: mpsc::UnboundedSender<Msg>) {
     let (kick, kicked) = channel();
+    let hold = kick.clone();
+    let poller = std::thread::Builder::new().name("config-poller".into());
+    let spawned = poller.spawn(move || {
+        let _hold = hold; // never Disconnected: recv_timeout is the 2s sleep, cut short by SIGHUP
+        let mut p = Poller::new(path, tx);
+        while !p.tx.is_closed() {
+            p.poll(kicked.recv_timeout(EVERY).is_ok());
+        }
+    });
+    if let Err(e) = spawned {
+        // no SIGHUP handler either: without the thread it would turn SIGHUP into a silent no-op
+        warn!("config poller not started: {e}; reload with `bifrost config reload`");
+        return;
+    }
     if tokio::runtime::Handle::try_current().is_ok() {
         use tokio::signal::unix::{SignalKind, signal};
         match signal(SignalKind::hangup()) {
@@ -26,24 +40,6 @@ pub fn spawn_poller(path: PathBuf, tx: mpsc::UnboundedSender<Msg>) {
             })),
             Err(e) => warn!("no SIGHUP handler: {e}"),
         }
-    }
-    let poller = std::thread::Builder::new().name("config-poller".into());
-    let spawned = poller.spawn(move || {
-        let mut p = Poller::new(path, tx);
-        while !p.tx.is_closed() {
-            let hup = match kicked.recv_timeout(EVERY) {
-                Ok(()) => true,
-                Err(RecvTimeoutError::Timeout) => false,
-                Err(RecvTimeoutError::Disconnected) => {
-                    std::thread::sleep(EVERY); // no SIGHUP handler: poll only
-                    false
-                }
-            };
-            p.poll(hup);
-        }
-    });
-    if let Err(e) = spawned {
-        warn!("config poller not started: {e}; reload with SIGHUP or `bifrost config reload`");
     }
 }
 
@@ -75,7 +71,8 @@ impl Poller {
     }
 
     /// One read. It acts on a settled change once: sends the parsed config (bad bytes too, as Err), or warns
-    /// that the file is gone and the active config stays. `hup` skips the debounce and acts even without a change.
+    /// that the file is gone and the active config stays (on `hup` it sends that as Err too). `hup` skips the
+    /// debounce and acts even without a change.
     /// Returns whether it acted.
     fn poll(&mut self, hup: bool) -> bool {
         let cur = read(&self.path);
@@ -87,7 +84,19 @@ impl Poller {
         self.acted = cur.clone();
         let path = &self.path;
         match cur {
-            Err(e) => warn!("config {}: {e}; keeping the active config", path.display()),
+            Err(e) => {
+                warn!("config {}: {e}; keeping the active config", path.display());
+                if hup {
+                    // like POST /v1/config/reload (load's error): the actor keeps the active config and reports it
+                    let _ = self.tx.send(Msg::Config {
+                        result: Err(vec![ConfigError {
+                            path: path.display().to_string(),
+                            message: format!("cannot read: {e}"),
+                        }]),
+                        reply: None,
+                    });
+                }
+            }
             Ok(bytes) => {
                 let why = if hup { "SIGHUP" } else { "changed" };
                 info!("config {} {why}: reloading", path.display());
@@ -252,6 +261,18 @@ mod tests {
             p.poll(true),
             "an explicit SIGHUP reloads unchanged bytes too"
         );
+        assert_eq!(sent(&mut rx), [ok(&["box2"])]);
+        // SIGHUP on a missing file reports it like `bifrost config reload` does (the actor keeps the active config)
+        std::fs::remove_file(&path).unwrap();
+        assert!(p.poll(true));
+        let errs = sent(&mut rx);
+        assert!(
+            matches!(&errs[..], [Err(e)] if e[0].contains("cannot read")),
+            "{errs:?}"
+        );
+        // restoring the same bytes is sent again, which clears the actor's config_errors
+        std::fs::write(&path, B).unwrap();
+        assert!(!p.poll(false) && p.poll(false));
         assert_eq!(sent(&mut rx), [ok(&["box2"])]);
     }
 }

@@ -85,4 +85,13 @@ check_p12() {
   ok "p12: original restored → box2, box3 gone within 20s" wait_until 20 p12_restored
   ok "p12: auto driver back to sshfs" p12_status '.auto_driver == "sshfs"'
   ok "p12: the restore remounted nothing but box2" p12_same "$(jq -c 'map(select(.[0] != "box2"))' <<<"$pids")"
+
+  # SIGHUP on a missing config reports it like `bifrost config reload` (a poll alone only logs a warning)
+  pids=$(p12_pids)
+  mv "$cfg" "$T/p12.away" && sig HUP "$DPID"
+  ok "p12: SIGHUP on a missing config → config_errors within 2s" \
+    wait_until 2 p12_status 'any(.config_errors[]; test("cannot read"))'
+  ok "p12: missing config: every mount untouched (same pids)" p12_same "$pids"
+  mv "$T/p12.away" "$cfg"
+  ok "p12: config back → config_errors cleared within 10s" wait_until 10 p12_status '.config_errors == []'
 }
