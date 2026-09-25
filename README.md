@@ -111,7 +111,7 @@ and `BIFROST_INVENTORY_TOKEN` must be set.
 version = 1                                   # optional; only 1 accepted
 
 [mount]
-root = "~/machines"                           # ~ and $VAR expanded; absolute; not "/", not $HOME, no ".."
+root = "~/machines"                           # ~ and $VAR expanded; absolute; not "/", not $HOME, no ".."; yours, not world-writable
 default_driver = "auto"                       # auto | sshfs | rclone | rclone-nfs
 auto_order = ["sshfs", "rclone"]              # default: linux [sshfs, rclone]; macos [rclone-nfs, rclone, sshfs]
 ssh_config = "~/.config/bifrost/ssh_config"   # optional → `-F` for ssh/sshfs/rclone-ssh; must exist; no '"'
@@ -390,7 +390,7 @@ Set `NO_COLOR` for a colourless UI: the glyphs (● ◐ ◌ ○ ✕) still show 
 | Mount only explicit paths | Remote paths come from config or the provider template. Record hints need `honor_hints` and validation. There is no driver hint |
 | Never execute discovery-supplied commands | Discovery data can only become a validated name, host, user, path or port. argv is built without a shell, and positionals never start with `-`. rclone runs with `--sftp-shell-type=none` |
 | TXT / HTTP data is untrusted | Size and count limits, per-record isolation, whole-node rejection, and escape-stripping on every displayed string (no terminal injection) |
-| Local paths: no traversal or collisions | Ids are single lowercase path components. Static locals win and conflicts are reported. Symlinks, files, non-empty or occupied mount points are refused. The root can't be `/` or `$HOME` |
+| Local paths: no traversal or collisions | Ids are single lowercase path components. Static locals win and conflicts are reported. Symlinks, files, non-empty or occupied mount points are refused. The root can't be `/` or `$HOME`, and must be yours and not world-writable |
 | Local API | A 0600 Unix socket, 0700 directories it creates, a lock against a second daemon, never under `/tmp` by default |
 
 **Host keys are never weakened.** Bifröst passes these ssh options, to sshfs, to rclone's `--sftp-ssh`

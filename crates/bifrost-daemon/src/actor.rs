@@ -589,7 +589,7 @@ impl Actor {
         }
     }
 
-    fn start_provider(&self, p: &mut Provider) {
+    fn start_provider(&mut self, p: &mut Provider) {
         p.task = None; // aborts the previous task
         match (self.deps.build_provider)(&p.cfg) {
             Ok(d) => {
@@ -598,7 +598,11 @@ impl Actor {
                 let run = discover_loop(d, name, p.task_gen, p.cfg.interval, notify, tx);
                 p.task = Some(Task(tokio::spawn(run.instrument(span))));
             }
-            Err(e) => p.last_error = Some(clean(&e, 512)), // B11
+            Err(e) => {
+                p.last_error = Some(clean(&e, 512)); // B11
+                // a changed provider's kept observations freeze like a failed refresh's, not age out (PRD §27)
+                self.registry.mark_failed(&p.cfg.name);
+            }
         }
     }
 
@@ -925,7 +929,13 @@ impl Actor {
             let unmount = caught("driver", || unmount, |e| Err(MountError::Failed(e)));
             let result = (tokio::time::timeout(Duration::from_secs(30), unmount).await)
                 .unwrap_or_else(|_| Err(MountError::Failed("unmount timed out after 30s".into())));
-            if result.is_ok() && matches!(why, Reason::NotDesired | Reason::Manual) {
+            // OfflineGrace too: row 7 keeps an offline peer unmounted, so no failed mount cleans up after a peer
+            // that is then deleted; the next mount recreates the directory (prepare_mountpoint)
+            let rm_dir = matches!(
+                why,
+                Reason::NotDesired | Reason::Manual | Reason::OfflineGrace
+            );
+            if result.is_ok() && rm_dir {
                 // §6: only an empty directory, only once the table says it is no mountpoint; never recursive
                 let p = h.local_path.clone();
                 let rm = move || {
@@ -1041,10 +1051,20 @@ impl Actor {
                 let (c, rt) = (self.candidates.get(id), self.runtimes.get(id));
                 let r = rt.unwrap_or(&none);
                 let h = r.handle.as_ref();
+                // before the first probe result (drivers "probing") a driver Err means not probed yet: the mount
+                // is pending, not Failed, so `bifrost mount`/doctor right after start don't report a false failure
+                let unprobed = (self.probes.is_empty() && !self.drivers.is_empty())
+                    && r.phase == Phase::Absent
+                    && c.is_some_and(|c| !c.held && c.driver.is_err());
+                let state = match reconcile::mount_availability(rt, c) {
+                    Availability::Failed if unprobed => Availability::Eligible,
+                    s => s,
+                };
                 let detail = match &r.health {
                     Health::Degraded(s) | Health::Stale(s) if r.phase == Phase::Mounted => {
                         s.clone()
                     }
+                    _ if unprobed => "probing drivers".into(),
                     _ => (c.filter(|c| !c.held).and_then(|c| c.driver.clone().err()))
                         .or_else(|| r.last_error.clone())
                         .unwrap_or_default(),
@@ -1068,7 +1088,7 @@ impl Actor {
                         .display()
                         .to_string(),
                     remote: c.map_or(String::new(), |c| c.spec.source()),
-                    state: reconcile::mount_availability(rt, c),
+                    state,
                     detail,
                     desired: c.is_some_and(|c| !c.held),
                     held: self.held.contains(id),
@@ -1427,8 +1447,7 @@ pub(crate) mod tests {
         mount(s, id).is_some_and(|m| m.state == a)
     }
 
-    /// A MountFailed event, not just the Failed state: before the first probe every desired mount reads Failed
-    /// (no driver yet, B15).
+    /// A MountFailed event, not just the Failed state (which a failed driver selection also shows, B15).
     fn failed(s: &StatusDto, id: &str) -> bool {
         (s.events.iter())
             .any(|r| matches!(&r.event, Event::MountFailed { mount, .. } if mount == id))
@@ -1846,16 +1865,51 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn drivers_listed_in_first_snapshot() {
         let r = rig("probing");
-        let mut h = r.start(r.cfg(RECON, ""), true, &[], &[]);
+        let mut h = r.start(r.cfg(RECON, &machine("a")), true, &[], &[]);
         // no await since spawn: on this current-thread runtime the probe task hasn't run yet
         let first: Vec<_> = (h.status.borrow().drivers.iter())
             .map(|d| (d.name.clone(), d.available, d.detail.clone()))
             .collect();
         assert_eq!(first, [("sshfs".to_string(), false, "probing".to_string())]);
+        // the desired mount is pending, not Failed: `bifrost mount a` right after start keeps polling
+        let s = h.status.borrow().clone();
+        let a = mount(&s, "a").unwrap();
+        assert_eq!(
+            (a.state, a.detail.as_str()),
+            (Availability::Eligible, "probing drivers")
+        );
+        assert_eq!(s.machines[0].state, Availability::Eligible);
         let s = h
             .until("probed", |s| s.drivers.iter().any(|d| d.available))
             .await;
         assert_eq!(s.drivers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn offline_grace_unmount_removes_empty_dir() {
+        let r = rig("grace-dir");
+        let grace1 = "offline_grace_period = \"1s\"\nretry_initial = \"1s\"\nretry_max = \"2s\"\n";
+        let mut o = obs("m1", "10.0.0.9");
+        o.online = Some(true);
+        r.set_disc(Ok(vec![o.clone()]));
+        let mut h = r.start(r.cfg(grace1, FAKE_ALL), true, &[], &[]);
+        h.until("m1 mounted", |s| is(s, "m1", Availability::Mounted))
+            .await;
+        let dir = r.root.join("m1");
+        std::fs::create_dir_all(&dir).unwrap(); // the fake driver makes none
+        // the peer goes offline: Degraded, then row 12 detaches it after the grace period; row 7 keeps it
+        // unmounted, so if the peer is then deleted nothing else would ever remove <root>/m1
+        o.online = Some(false);
+        r.set_disc(Ok(vec![o]));
+        h.send(Msg::Api(ApiCmd::Discover));
+        r.drv
+            .fake
+            .set_state("m1", MountState::Degraded("down".into()));
+        h.send(Msg::Tick(Tick::Health));
+        h.until("m1 offline", |s| is(s, "m1", Availability::Offline))
+            .await;
+        assert_eq!(r.calls(), ["mount m1", "unmount m1 force=true"]);
+        assert!(!dir.exists());
     }
 
     #[tokio::test]
@@ -1983,6 +2037,33 @@ pub(crate) mod tests {
         assert!(h.reload(r.cfg(RECON, FAKE)).await.ok);
         h.until("m1", |s| s.machines.len() == 1).await;
         assert_eq!(r.builds.load(SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn reload_unbuildable_provider_freezes_observations() {
+        let r = rig("rebuild-freeze");
+        r.set_disc(Ok(vec![obs("m1", "10.0.0.9")]));
+        // below config's 1s floor, so the 3 x interval expiry comes within the test
+        let every = |ms| {
+            let mut c = r.cfg(RECON, FAKE_ALL);
+            c.providers[0].interval = Duration::from_millis(ms);
+            c
+        };
+        let mut h = r.start(every(100), true, &[], &[]);
+        h.until("m1 mounted", |s| is(s, "m1", Availability::Mounted))
+            .await;
+        // a changed provider whose build fails (a URL config check accepts but reqwest can't parse): no task,
+        // so no refresh ever marks it failing; its view must freeze like a failing refresh's, not age out
+        r.fail_build.store(true, SeqCst);
+        assert!(h.reload(every(101)).await.ok);
+        h.until("build failed", |s| s.providers[0].last_error.is_some())
+            .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        h.reconcile().await; // expire() runs only in a pass
+        let s = h.status.borrow().clone();
+        assert_eq!(s.machines.len(), 1, "{:?}", s.machines);
+        assert!(is(&s, "m1", Availability::Mounted));
+        assert_eq!(r.calls(), ["mount m1"]);
     }
 
     #[tokio::test]

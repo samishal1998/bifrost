@@ -482,6 +482,23 @@ fn doctor_config_drivers_and_macos_hint() {
     assert!(row.ends_with(&format!(" {hint}")), "{out}");
     t.join().unwrap();
 
+    // right after daemon start the first probe hasn't answered: no default yet is not "no driver"
+    let t = stub(&sock_again(&sock), 1, |_, _| {
+        let mut s = status_dto();
+        s.drivers[0].available = false;
+        s.drivers[0].binary = None;
+        s.drivers[0].detail = "probing".into();
+        s.auto_driver = None;
+        (200, serde_json::to_string(&s).unwrap())
+    });
+    let o = doctor(&[]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    assert!(
+        stdout(&o).contains("\nSelected default\n  probing\n"),
+        "{o:?}"
+    );
+    t.join().unwrap();
+
     // a bad config is a ✗ and exit 1, daemon or not
     std::fs::write(&cfg, "[mount]\nrot = 1\n").unwrap();
     let _ = std::fs::remove_file(&sock);

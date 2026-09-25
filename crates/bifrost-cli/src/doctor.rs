@@ -153,6 +153,8 @@ pub async fn run(client: &Client, config: Option<PathBuf>) -> i32 {
     out += "Selected default\n";
     match auto {
         Some(a) => out += &format!("  {}\n", c(&a)),
+        // the daemon's first probe hasn't answered yet (drivers "probing"): nothing is known missing
+        None if ds.iter().any(|d| d.detail == "probing") => out += "  probing\n",
         None => {
             bad = true;
             out += "  ✗ none (no available driver)\n";

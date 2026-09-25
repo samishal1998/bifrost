@@ -171,6 +171,16 @@ async fn run(o: Opts, deps: Deps, stop: impl Future<Output = ()> + Send + 'stati
         Ok(r) => r,
         Err(e) => return fail(1, format!("mount.root {}: {e}", cfg.root.display())),
     };
+    // another user who can write the root could swap <root>/<id> for a symlink before the mount, or mount there
+    // first with our marker (§11). 0o002, not 0o022: a umask-002 (user private group) ~/machines is 0775
+    // ponytail: the root's ancestors and a group shared with other users aren't checked (as for the state dir); walk the ancestors and test 0o020 if shared roots matter
+    match std::fs::metadata(&root) {
+        Ok(m) if m.uid() == uid && m.mode() & 0o002 == 0 => {}
+        _ => {
+            let why = "must be owned by this user and not world-writable";
+            return fail(1, format!("mount.root {} {why}", root.display()));
+        }
+    }
     // 6–7. state.json, then adoption of our marker mounts directly under the root
     let st = state::read(&o.state_dir);
     let table = bifrost_mount::table::read().unwrap_or_else(|e| {
@@ -441,6 +451,28 @@ mod tests {
         // sun_path limit
         let long = home.join("x".repeat(120));
         assert!(bind_socket(&long, uid).err().unwrap().contains("103"));
+    }
+
+    #[tokio::test]
+    async fn world_writable_root_refused() {
+        let r = rig("root-owner");
+        // another local user could swap <root>/<id> for a symlink between mkdir and the mount, or pre-mount it
+        std::fs::create_dir(&r.root).unwrap();
+        std::fs::set_permissions(&r.root, Permissions::from_mode(0o1777)).unwrap();
+        let config = r.dir.join("config.toml");
+        std::fs::write(&config, r.text(&r.root, RECON, &machine("a"))).unwrap();
+        let o = Opts {
+            config,
+            state_dir: r.dir.join("state"),
+            socket: r.dir.join("s.sock"),
+        };
+        let d = tokio::time::timeout(
+            Duration::from_secs(5),
+            run(o, r.deps(), std::future::pending()),
+        );
+        assert_eq!(d.await.ok(), Some(1));
+        assert!(r.calls().is_empty());
+        assert!(!r.dir.join("s.sock").exists());
     }
 
     /// Runs the whole daemon (startup §8 steps 2–10) on the rig's config, state dir and `sock`.
