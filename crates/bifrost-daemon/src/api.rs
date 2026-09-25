@@ -180,16 +180,14 @@ async fn log(State(s): State<AppState>, Path(id): Path<String>) -> Result<Json<L
     let p = path.clone();
     let text = tokio::task::spawn_blocking(move || {
         let mut f = std::fs::File::open(p)?;
-        let start = f.metadata()?.len().saturating_sub(LOG_TAIL);
+        let start = f.metadata()?.len().saturating_sub(LOG_TAIL + 1);
         f.seek(SeekFrom::Start(start))?;
         let mut buf = Vec::new();
-        f.take(LOG_TAIL).read_to_end(&mut buf)?;
+        f.take(LOG_TAIL + 1).read_to_end(&mut buf)?;
         if start > 0 {
-            // we landed mid-line: drop the partial first line
-            let cut = buf
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(buf.len(), |i| i + 1);
+            // buf[0] is the byte before the 64 KiB window: drop through the first '\n' (just that byte if it is
+            // one); no '\n' at all means one huge line, so keep the fragment (clean() caps it at 512)
+            let cut = buf.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1);
             buf.drain(..cut);
         }
         std::io::Result::Ok(String::from_utf8_lossy(&buf).into_owned())
@@ -384,12 +382,19 @@ mod tests {
                             action: "noop".into(),
                         }]);
                     }
+                    // echoes load's result, so the reload test sees what the route really loaded
                     Msg::Config {
-                        reply: Some(reply), ..
+                        result,
+                        reply: Some(reply),
                     } => {
                         let _ = reply.send(ReloadDto {
-                            ok: true,
-                            errors: vec!["from stub".into()],
+                            ok: result.is_ok(),
+                            errors: result
+                                .err()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect(),
                         });
                     }
                     _ => {}
@@ -490,11 +495,11 @@ mod tests {
     async fn reload_route_sends_config_msg() {
         let dir = tmp("reload");
         stub_actor(serve(&dir));
+        std::fs::write(dir.join("config.toml"), "[[[").unwrap();
         let c = Client::new(dir.join("s.sock"));
-        // the stub answers only Msg::Config with reply: Some, so getting its DTO back proves the route awaited it
+        // the stub echoes Msg::Config's result, so errors back prove the route awaited a real load(config_path)
         let dto: ReloadDto = c.post("/v1/config/reload", &json!({})).await.unwrap();
-        assert!(dto.ok);
-        assert_eq!(dto.errors, ["from stub"]);
+        assert!(!dto.ok && !dto.errors.is_empty(), "{dto:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -524,6 +529,21 @@ mod tests {
         assert_eq!(dto.mount, "agent-01");
         assert_eq!(dto.lines, ["?[31mred", "last"]);
         assert!(dto.path.ends_with("logs/agent-01.log"));
+
+        // the cut lands exactly on a line start: that line is kept whole, not dropped
+        std::fs::write(
+            dir.join("logs/b.log"),
+            format!("first\n{}\n", "y".repeat(65535)),
+        )
+        .unwrap();
+        let (code, body) = raw(&dir, "GET", "/v1/mounts/b/log", "").await;
+        let lines = serde_json::from_str::<Value>(&body).unwrap()["lines"].clone();
+        assert_eq!((code, lines.as_array().map(Vec::len)), (200, Some(1)));
+        // no '\n' in the window (one huge line still being written): its fragment is kept, not dropped
+        std::fs::write(dir.join("logs/c.log"), "z".repeat(70_000)).unwrap();
+        let (code, body) = raw(&dir, "GET", "/v1/mounts/c/log", "").await;
+        let lines = serde_json::from_str::<Value>(&body).unwrap()["lines"].clone();
+        assert_eq!((code, lines.as_array().map(Vec::len)), (200, Some(1)));
         let _ = std::fs::remove_dir_all(dir);
     }
 
