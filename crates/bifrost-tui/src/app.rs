@@ -252,12 +252,18 @@ impl App {
         rows.into_iter().filter(keep).collect()
     }
 
-    /// A poll result: None (unreachable, timed out, undecodable) keeps the last snapshot.
+    /// A poll result: None (unreachable, timed out, undecodable) keeps the last snapshot. The selection stays on
+    /// the same id when rows are inserted or removed around it, so a key never acts on a row the user didn't pick.
     pub fn on_status(&mut self, s: Option<StatusDto>) {
         self.unreachable = s.is_none();
         if s.is_some() {
+            let keep = self.rows().get(self.selected).map(|r| r.0.clone());
             self.status = s;
-            self.selected = self.selected.min(self.rows().len().saturating_sub(1));
+            let rows = self.rows();
+            let at = keep.and_then(|id| rows.iter().position(|r| r.0 == id));
+            self.selected = at
+                .unwrap_or(self.selected)
+                .min(rows.len().saturating_sub(1));
         }
     }
 
@@ -360,6 +366,18 @@ impl App {
         }
         let id = self.rows().get(self.selected)?.0.clone();
         Some(Command::FetchLog(id))
+    }
+
+    /// A machine row means all its mounts (§10); the daemon resolves an id that is also a mount id to that mount
+    /// alone (B15), so the TUI expands it.
+    pub fn mounts_of(&self, t: &str) -> Vec<String> {
+        let m = (self.status.as_ref())
+            .filter(|_| self.view == View::Machines)
+            .and_then(|s| s.machines.iter().find(|m| m.id == t));
+        match m {
+            Some(m) if !m.mounts.is_empty() => m.mounts.clone(),
+            _ => vec![t.to_string()],
+        }
     }
 
     /// The selected machine or mount id; anywhere else, a hint in the status line.
@@ -470,11 +488,18 @@ pub fn fixture() -> StatusDto {
         auto_driver: Some("sshfs".into()),
         machines: vec![
             machine("agent-01", "tailscale", A::Mounted),
-            machine("build", "static", A::Failed),
+            MachineDto {
+                mounts: vec!["build".into(), "build-artifacts".into()],
+                ..machine("build", "static", A::Failed)
+            },
         ],
         mounts: vec![
             mount("agent-01", Some("sshfs"), A::Mounted, None),
             mount("build", None, A::Failed, Some("connection refused")),
+            MountDto {
+                machine: "build".into(),
+                ..mount("build-artifacts", None, A::Failed, None)
+            },
         ],
         conflicts: vec![],
         events: vec![
@@ -507,6 +532,7 @@ pub fn fixture() -> StatusDto {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use bifrost_core::api::MachineDto;
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
     pub fn key(c: KeyCode) -> KeyEvent {
@@ -642,6 +668,29 @@ pub mod tests {
             a.on_key(ch('k')),
             Some(Command::FetchLog("agent-01".into()))
         );
+    }
+
+    #[test]
+    fn machine_row_means_all_its_mounts() {
+        let a = app(View::Machines);
+        assert_eq!(a.mounts_of("build"), ["build", "build-artifacts"]);
+        // the Mounts view targets the mount alone
+        let a = app(View::Mounts);
+        assert_eq!(a.mounts_of("build"), ["build"]);
+    }
+
+    #[test]
+    fn selection_follows_id_across_snapshots() {
+        let mut a = app(View::Machines);
+        a.on_key(ch('j'));
+        let mut s = fixture();
+        let first = MachineDto {
+            id: "aaa".into(),
+            ..s.machines[0].clone()
+        };
+        s.machines.insert(0, first);
+        a.on_status(Some(s));
+        assert_eq!(a.on_key(ch('m')), Some(Command::Mount("build".into())));
     }
 
     #[test]

@@ -20,6 +20,8 @@ const USAGE: &str = "usage: bifrost-tui [--socket PATH]
 
 /// The routes return at once (§10); this only bounds a wedged daemon.
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);
+/// Polls (status, the Logs view) use the short bound, so a wedged daemon never stalls the keys (§10).
+const POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn main() {
     let socket = match socket_arg() {
@@ -38,7 +40,11 @@ fn main() {
     let client = Client::new(socket.clone());
     let mut app = App::new(&socket.display().to_string(), no_color);
     // installs a panic hook that restores the terminal first
-    let mut term = ratatui::try_init().unwrap_or_else(|e| fail(e));
+    // try_init can fail after enabling raw mode; restore before exiting (a panic would reach the hook, an exit not)
+    let mut term = ratatui::try_init().unwrap_or_else(|e| {
+        let _ = ratatui::try_restore();
+        fail(e)
+    });
     let r = run(&mut term, &rt, &client, &mut app);
     ratatui::restore();
     if let Err(e) = r {
@@ -81,7 +87,7 @@ fn run(
             // ponytail: no SSE consumer, the TUI polls /v1/status every 1s inline (no poller task or channel, E6), so event latency is ≤1s; upgrade: Client::events() plus a `bifrost events` command
             let get = client.get::<StatusDto>("/v1/status");
             // timeout() builds its timer at once, so it must be created inside the runtime
-            let r = rt.block_on(async { timeout(Duration::from_millis(500), get).await });
+            let r = rt.block_on(async { timeout(POLL_TIMEOUT, get).await });
             app.on_status(r.ok().and_then(Result::ok));
             status_at = now + Duration::from_secs(1);
         }
@@ -114,11 +120,27 @@ fn run(
     }
 }
 
-fn call<T>(rt: &Runtime, f: impl Future<Output = Result<T, ClientError>>) -> Result<T, String> {
-    match rt.block_on(async { timeout(CMD_TIMEOUT, f).await }) {
+fn call<T>(
+    rt: &Runtime,
+    t: Duration,
+    f: impl Future<Output = Result<T, ClientError>>,
+) -> Result<T, String> {
+    match rt.block_on(async { timeout(t, f).await }) {
         Ok(r) => r.map_err(|e| e.to_string()),
-        Err(_) => Err(format!("timed out after {}s", CMD_TIMEOUT.as_secs())),
+        Err(_) => Err(format!("timed out after {t:?}")),
     }
+}
+
+/// `post` once per mount of the selection (`App::mounts_of`), each id validated; stops at the first error.
+fn each_mount(
+    app: &App,
+    t: &str,
+    post: impl Fn(&str) -> Result<Vec<String>, String>,
+) -> Result<Vec<String>, String> {
+    app.mounts_of(t).iter().try_fold(vec![], |mut acc, t| {
+        acc.extend(post(&id(t)?)?);
+        Ok(acc)
+    })
 }
 
 /// Only a valid id reaches a route path.
@@ -132,49 +154,57 @@ fn id(s: &str) -> Result<String, String> {
 fn exec(rt: &Runtime, client: &Client, app: &mut App, cmd: Command) {
     let empty = BTreeMap::<String, String>::new(); // `{}` for the body-less POSTs (C6)
     let line = match cmd {
-        Command::Mount(t) => id(&t)
-            .and_then(|t| {
-                call(
-                    rt,
-                    client.post::<Vec<String>>(&format!("/v1/mounts/{t}/mount"), &empty),
-                )
-            })
-            .map(|ids| format!("mount requested: {}", ids.join(", "))),
-        Command::Unmount(t, force) => id(&t)
-            .and_then(|t| {
-                let path = format!("/v1/mounts/{t}/unmount");
-                call(rt, client.post::<Vec<String>>(&path, &UnmountReq { force }))
-            })
-            .map(|ids| {
-                let what = if force { "force unmount" } else { "unmount" };
-                format!("{what} requested: {}", ids.join(", "))
-            }),
-        Command::Reconcile => {
-            call(rt, client.post::<Vec<ActionDto>>("/v1/reconcile", &empty)).map(|actions| {
-                let acts: Vec<String> = (actions.iter())
-                    .filter(|a| a.action != "noop")
-                    .map(|a| format!("{} {}", a.mount, a.action))
-                    .collect();
-                match acts.is_empty() {
-                    true => "reconcile: nothing to do".into(),
-                    false => format!("reconcile: {}", acts.join(", ")),
-                }
-            })
-        }
+        Command::Mount(t) => each_mount(app, &t, |t| {
+            let path = format!("/v1/mounts/{t}/mount");
+            call(rt, CMD_TIMEOUT, client.post(&path, &empty))
+        })
+        .map(|ids| format!("mount requested: {}", ids.join(", "))),
+        Command::Unmount(t, force) => each_mount(app, &t, |t| {
+            let path = format!("/v1/mounts/{t}/unmount");
+            call(rt, CMD_TIMEOUT, client.post(&path, &UnmountReq { force }))
+        })
+        .map(|ids| {
+            let what = if force { "force unmount" } else { "unmount" };
+            format!("{what} requested: {}", ids.join(", "))
+        }),
+        Command::Reconcile => call(
+            rt,
+            CMD_TIMEOUT,
+            client.post::<Vec<ActionDto>>("/v1/reconcile", &empty),
+        )
+        .map(|actions| {
+            let acts: Vec<String> = (actions.iter())
+                .filter(|a| a.action != "noop")
+                .map(|a| format!("{} {}", a.mount, a.action))
+                .collect();
+            match acts.is_empty() {
+                true => "reconcile: nothing to do".into(),
+                false => format!("reconcile: {}", acts.join(", ")),
+            }
+        }),
         Command::Discover => call(
             rt,
+            CMD_TIMEOUT,
             client.post::<BTreeMap<String, String>>("/v1/discover", &empty),
         )
         .map(|_| "discovery requested".into()),
-        Command::Reload => {
-            call(rt, client.post::<ReloadDto>("/v1/config/reload", &empty)).map(|r| match r.ok {
-                true => "config reloaded".into(),
-                false => format!("config reload failed: {}", r.errors.join("; ")),
-            })
-        }
+        Command::Reload => call(
+            rt,
+            CMD_TIMEOUT,
+            client.post::<ReloadDto>("/v1/config/reload", &empty),
+        )
+        .map(|r| match r.ok {
+            true => "config reloaded".into(),
+            false => format!("config reload failed: {}", r.errors.join("; ")),
+        }),
         Command::FetchLog(m) => {
-            let r =
-                id(&m).and_then(|t| call(rt, client.get::<LogDto>(&format!("/v1/mounts/{t}/log"))));
+            let r = id(&m).and_then(|t| {
+                call(
+                    rt,
+                    POLL_TIMEOUT,
+                    client.get::<LogDto>(&format!("/v1/mounts/{t}/log")),
+                )
+            });
             // an error (no log yet: 404) shows in the Logs pane, not every 2s in the status line
             app.log = Some(r.unwrap_or_else(|e| LogDto {
                 mount: m,

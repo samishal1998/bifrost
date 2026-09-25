@@ -211,7 +211,12 @@ pub fn render(app: &App, f: &mut Frame) {
             let rows: Vec<Vec<Line>> = (app.rows().into_iter())
                 .map(|(_, mut cells)| {
                     if !marks {
-                        return cells.into_iter().map(Line::raw).collect();
+                        return (cells.into_iter().enumerate())
+                            .map(|(i, s)| match i {
+                                0 => Line::styled(s, fg(STONE)),
+                                _ => Line::raw(s),
+                            })
+                            .collect();
                     }
                     let mark = cells.remove(0);
                     let first = Line::from(vec![
@@ -376,9 +381,13 @@ fn details(app: &App, id: &str) -> Vec<Line<'static>> {
         } else {
             format!(" ({how})")
         };
+        l.extend([Line::default(), kv("mount", c(&m.id))]);
+        if app.view != View::Machines
+            && let Some(mm) = s.machines.iter().find(|x| x.id == m.machine)
+        {
+            l.push(kv("verdict", c(&mm.verdict)));
+        }
         l.extend([
-            Line::default(),
-            kv("mount", c(&m.id)),
             kv(
                 "state",
                 format!("{} {}{how}", glyph(m.state), state_name(m.state)),
@@ -518,6 +527,21 @@ mod tests {
     }
 
     #[test]
+    fn events_timestamps_are_stone() {
+        let a = app(View::Events);
+        let ts = hms(a.status.as_ref().unwrap().events[0].ts_unix_ms);
+        let (x, y) = find(&draw(&a), &ts).expect("timestamp");
+        assert_eq!(draw(&a)[(x, y)].fg, STONE);
+    }
+
+    #[test]
+    fn mount_details_show_verdict() {
+        let mut a = app(View::Mounts);
+        a.popup = Some(Popup::Details("build-artifacts".into()));
+        assert!(find(&draw(&a), "verdict   allowed (static)").is_some());
+    }
+
+    #[test]
     fn overview_shows_wordmark_and_tagline() {
         let b = draw(&app(View::Overview));
         let (x, y) = find(&b, "Bifröst").expect("wordmark");
@@ -525,7 +549,7 @@ mod tests {
         let (x, y) = find(&b, "Remote worlds. Local files.").expect("tagline");
         assert_eq!(b[(x, y)].fg, STONE);
         // counts, provider health, last events
-        assert!(find(&b, "1/2 mounted").is_some());
+        assert!(find(&b, "1/3 mounted").is_some());
         assert!(find(&b, "tailscale").is_some());
         assert!(find(&b, "failed build").is_some());
     }
