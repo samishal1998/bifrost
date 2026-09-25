@@ -157,6 +157,8 @@ struct Peer {
     TailscaleIPs: Option<Vec<IpAddr>>,
     Tags: Option<Vec<String>>,
     Online: bool,
+    #[serde(default)] // omitempty upstream
+    ShareeNode: bool,
 }
 
 /// pure
@@ -183,6 +185,9 @@ pub fn parse_status(json: &[u8]) -> Result<Vec<MachineObservation>, DiscoveryErr
     let mut peers = Vec::new();
     for (key, v) in s.Peer.unwrap_or_default() {
         match serde_json::from_value::<Peer>(v) {
+            // another user's device, listed only because we shared this node with them: it may connect to us
+            // but is never ours to mount; `tailscale status` hides it too, so no warning
+            Ok(p) if p.ShareeNode => {}
             Ok(p) => peers.push(p),
             Err(e) => skip(&key, &e.to_string()),
         }
@@ -335,7 +340,8 @@ mod tests {
     fn tailscale_fixture_parse() {
         let o = parse_status(FIXTURE).unwrap();
         // Self excluded; the shared-in devbox.other.ts.net. repeats the id "devbox" and loses to our own
-        // tailnet's devbox (own suffix first); the capitalised HostName fallback is kept (lowercased)
+        // tailnet's devbox (own suffix first); the capitalised HostName fallback is kept (lowercased); the sharee
+        // node build-01 (another user's device, ShareeNode) is never listed
         assert_eq!(ids(&o), ["devbox", "devbox-1", "fixture-macbook", "phone"]);
         let tags = ["dev", "server"].map(String::from); // "tag:" stripped, lowercased, "bad tag!" dropped
         let values = [

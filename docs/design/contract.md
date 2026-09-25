@@ -913,7 +913,7 @@ Notes on the table:
 | config change | poller / SIGHUP (`reload.rs`) / `POST /v1/config/reload` (`spawn_blocking(load)`) → `Msg::Config`; the actor applies it with the same config-apply path it uses at startup (A4) |
 | API | `Msg::Api(cmd)` with a oneshot reply (`ApiCmd::Discover` has none, E4) |
 
-**Warm-up.** `ready` is false until a config file has actually loaded (A6): with no config file, no healthy, un-held mount is unmounted (row 3 still clears a Stale or force-requested mount, and a held unmount goes through), and the grace period does not run. Once a config file has loaded, `ready` becomes true when every network provider has returned a **non-empty Ok** at least once (A18), or `offline_grace_period` has passed since the first successful config load (`cfg_loaded_at`: the daemon start when the file exists at startup, else the moment the first `Msg::Config` with Ok is applied, whether it comes from the poller, SIGHUP or the API). Measuring from the load, not the start, keeps a late-appearing config from being ready before any provider has reported. A static-only config is therefore ready immediately. An `Ok(vec![])` (for example a DNS NXDOMAIN on the index) and an `Err` never count. A provider whose `build_provider` failed never reports, so it waits for the grace period (B11). Once true, `ready` stays true. Before that, only rows 4/5 are blocked, and a held (manual) unmount goes through. Removal decisions that depend on discovery wait for discovery to have actually worked. A provider that is down at login delays removals by at most the grace period.
+**Warm-up.** `ready` is false until a config file has actually loaded (A6): with no config file, no healthy, un-held mount is unmounted (row 3 still clears a Stale or force-requested mount, and a held unmount goes through), and the grace period does not run. Once a config file has loaded, `ready` becomes true when every network provider has returned a **non-empty Ok** at least once (A18), or `offline_grace_period` has passed since the first successful config load (`cfg_loaded_at`: the daemon start when the file exists at startup, else the moment the first `Msg::Config` with Ok is applied, whether it comes from the poller, SIGHUP or the API). Measuring from the load, not the start, keeps a late-appearing config from being ready before any provider has reported. A static-only config is therefore ready immediately. An `Ok(vec![])` (for example a DNS NXDOMAIN on the index) and an `Err` never count. A provider whose `build_provider` failed never reports, so it waits for the grace period (B11) unless a reload rebuilds it. Once true, `ready` stays true. Before that, only rows 4/5 are blocked, and a held (manual) unmount goes through. Removal decisions that depend on discovery wait for discovery to have actually worked. A provider that is down at login delays removals by at most the grace period.
 
 **Concurrency model.** One actor task owns all mutable state: `Arc<Config>`, the registry, runtimes, `held`, probe results, the previous verdicts, provider status and the event ring. There are no locks on domain state.
 
@@ -1171,7 +1171,8 @@ Invocation and errors:
 
 Parsed JSON:
 - Top level: `{BackendState, CurrentTailnet?{MagicDNSEnabled}, Peer: Option<BTreeMap<String, Peer>>}`. `Self` is ignored, so we never mount ourselves.
-- `Peer{ID, HostName, DNSName, OS (default ""), TailscaleIPs: Option<Vec<IpAddr>>, Tags: Option<Vec<String>>, Online}`.
+- `Peer{ID, HostName, DNSName, OS (default ""), TailscaleIPs: Option<Vec<IpAddr>>, Tags: Option<Vec<String>>, Online, ShareeNode (default false)}`.
+- A `ShareeNode: true` peer is skipped silently: it is another user's device, in our netmap only because we shared this node with them (it may connect to us, it is never ours to mount), and `tailscale status` hides it too.
 - Peers are processed sorted by DNSName.
 
 | observation field | source | if invalid |
@@ -1189,19 +1190,24 @@ New peers appear on the next refresh without a restart.
 
 Resolver setup:
 ```rust
-let b = if nameservers.is_empty() {
-    TokioResolver::builder_tokio().map_err(|e| e.to_string())?      // C8: NetError → String
-} else {
-    let ns = nameservers.iter().map(|sa| {
-        let mut n = NameServerConfig::udp_and_tcp(sa.ip());
-        for c in &mut n.connections { c.port = sa.port(); }
-        n
-    }).collect();
-    Resolver::builder_with_config(ResolverConfig::from_name_servers(ns), TokioRuntimeProvider::default())
-};
+// new(): explicit nameservers only; empty → resolver: None, nothing read at build time
+let ns = nameservers.iter().map(|sa| {
+    let mut n = NameServerConfig::udp_and_tcp(sa.ip());
+    for c in &mut n.connections { c.port = sa.port(); }
+    n
+}).collect();
+let b = Resolver::builder_with_config(ResolverConfig::from_name_servers(ns), TokioRuntimeProvider::default());
 // no options_mut() lines (D1): ResolverOpts::default() is already 5s timeout × 2 attempts
-let resolver = b.build().map_err(|e| e.to_string())?;   // the cache stays on and honours TTL for lookups
+let resolver = Some(b.build().map_err(|e| e.to_string())?);   // C8: NetError → String; the cache honours TTL
+// discover(), every refresh: the system resolver is re-read (resolv.conf, SCDynamicStore on macOS)
+let resolver = match &self.resolver {
+    Some(r) => r.clone(),
+    None => TokioResolver::builder_tokio().and_then(|b| b.build())
+        .map_err(|e| DiscoveryError::Failed(clean(&e.to_string(), 512)))?,
+};
 ```
+
+The system config is never snapshotted: a snapshot keeps querying the old servers after a network change (DHCP, VPN), and one that failed at start (offline, no `nameserver` line yet) would leave the provider dead. A failed read is a normal `Failed` (freeze, retried next interval).
 
 All queries are absolute names ending in `.`, so resolv.conf search domains never apply.
 
@@ -1234,7 +1240,7 @@ Algorithm:
    - zero bf1 RRs → skip;
    - more than one **distinct** valid bf1 RR → skip as "ambiguous";
    - **any** key failing validation → skip the whole node. Attacker data is never partially applied.
-4. `ttl = min(index.valid_until(), node.valid_until()).saturating_duration_since(now)`. Record changes show up when the TTL expires (hickory cache); removals take `max(ttl, 3 × interval)`.
+4. `ttl = min(index.valid_until(), node.valid_until()).saturating_duration_since(now)`. Record changes show up on the first refresh after the TTL expires (hickory's cache with explicit nameservers; the system stub or upstream otherwise); removals take `max(ttl, 3 × interval)`.
 
 **HTTP.**
 - Client: `reqwest::Client::builder().timeout(10s).redirect(Policy::none()).user_agent("bifrost/<ver>")`. No redirects means auth headers can't leak.
@@ -1379,7 +1385,7 @@ In the actor (`actor.rs`), one config-apply path serves startup and every `Msg::
 - **Valid config:**
   - `registry.replace(static_source(), new.static_observations())`;
   - diff providers by name: removed → abort the task and `remove_provider`; added → spawn; changed (`ProviderConfig !=`) → abort and respawn with `task_gen + 1` (observations are kept until they expire); unchanged → keep;
-  - a `build_provider` Err sets that provider's `ProviderDto.last_error`, spawns no task, and leaves warm-up to the grace period (B11);
+  - a `build_provider` Err sets that provider's `ProviderDto.last_error`, spawns no task, and leaves warm-up to the grace period (B11); a provider with no task is rebuilt on every apply, an unchanged reload included (`task.is_none() || cfg !=`);
   - rebuild `policy` and templates;
   - rebuild drivers with `(deps.drivers)(&settings)` (A5) if `ssh_config`, `vfs_cache_mode` or `mount_timeout` changed, then re-probe;
   - swap the config, mark it loaded (A6), emit `ConfigurationReloaded{ok: true}`, clear `config_errors`, run a pass.
@@ -1922,3 +1928,4 @@ S4a gate: `run.sh all` passed 164/164 twice in a row, with only p07's opt-in ski
 4. **Accepted: drivers show `probing` in the snapshot** until the first probe result arrives.
 5. **Replaces §12's skip rule:** `run.sh` now treats a missing listed phase file as FATAL. The only skip left is p07's opt-in.
 6. **Final review r1 (bifrost-mount):** the preflight and `--sftp-ssh` now start with `SSH_CLI_HARDENING` (`-a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no`), so a `ForwardAgent`/`ForwardX11`/`RemoteForward` in the user's ssh_config never reaches a mounted host (sshfs already did this). A failed `mount()` (steps 4–6) now removes `<root>/<id>` when the table shows no mount there; this also removes a user-precreated empty dir, as the post-unmount cleanup does.
+7. **Final review r1 (bifrost-discovery):** tailscale skips `ShareeNode` peers silently (another user's device, hidden by `tailscale status`; at trust 1 it could otherwise shadow a DNS/HTTP machine of the same id). The DNS provider with no `nameservers` re-reads the system resolver config on every refresh instead of snapshotting it in `new()`, so a network change or an offline start no longer leaves it stale or dead; explicit nameservers keep one cached resolver. A provider whose build failed is rebuilt on the next apply, an unchanged reload (`bifrost config reload`, SIGHUP) included (test `reload_retries_failed_provider_build`).

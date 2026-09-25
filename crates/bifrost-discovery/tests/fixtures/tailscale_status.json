@@ -203,11 +203,44 @@
       "InMagicSock": true,
       "InEngine": true,
       "KeyExpiry": "2027-01-01T00:00:00Z"
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000006": {
+      "ID": "nSharee0006CNTRL",
+      "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000006",
+      "HostName": "build-01",
+      "DNSName": "build-01.stranger.ts.net.",
+      "OS": "linux",
+      "UserID": 3003,
+      "TailscaleIPs": ["100.100.7.7", "fd7a:115c:a1e0::f"],
+      "AllowedIPs": ["100.100.7.7/32", "fd7a:115c:a1e0::f/128"],
+      "Addrs": null,
+      "CurAddr": "",
+      "Relay": "fra",
+      "PeerRelay": "",
+      "RxBytes": 0,
+      "TxBytes": 0,
+      "Created": "2026-01-01T00:00:00Z",
+      "LastWrite": "0001-01-01T00:00:00Z",
+      "LastSeen": "0001-01-01T00:00:00Z",
+      "LastHandshake": "0001-01-01T00:00:00Z",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "PeerAPIURL": ["http://100.100.7.7:49999"],
+      "TaildropTarget": 0,
+      "NoFileSharingReason": "",
+      "ShareeNode": true,
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": true,
+      "KeyExpiry": "2027-01-01T00:00:00Z"
     }
   },
   "User": {
     "1001": { "ID": 1001, "LoginName": "fixture@example.com", "DisplayName": "Fixture User", "ProfilePicURL": "" },
-    "2002": { "ID": 2002, "LoginName": "other@example.com", "DisplayName": "Other User", "ProfilePicURL": "" }
+    "2002": { "ID": 2002, "LoginName": "other@example.com", "DisplayName": "Other User", "ProfilePicURL": "" },
+    "3003": { "ID": 3003, "LoginName": "stranger@example.net", "DisplayName": "Stranger", "ProfilePicURL": "" }
   },
   "ClientVersion": null
 }

@@ -157,7 +157,7 @@ honor_hints = false                           # true ⇒ record user=/path= win 
 type = "dns"
 name = "infra"
 domain = "infra.example.com"
-nameservers = ["10.0.0.2", "127.0.0.1:5353"]  # optional "ip" | "ip:port"; default: system resolver
+nameservers = ["10.0.0.2", "127.0.0.1:5353"]  # optional "ip" | "ip:port"; default: system resolver (re-read each refresh)
 
 [discovery.filter]
 include_names = ["agent-*", "build-*"]
@@ -253,8 +253,9 @@ Each provider refreshes every `interval`. Up to that many seconds pass before a 
 refreshes now).
 
 A machine missing from successful refreshes is dropped after `max(TTL, 3 × interval)`, and its mount is unmounted
-gracefully. A provider that fails keeps serving its last good view, frozen until it recovers. Invalid records are
-skipped one by one with a warning in the daemon log.
+gracefully. A provider that fails keeps serving its last good view, frozen until it recovers; one that could not
+start at all is retried on the next `bifrost config reload` or SIGHUP. Invalid records are skipped one by one with
+a warning in the daemon log.
 
 **Tailscale** (`type = "tailscale"`, trust 1):
 - runs `tailscale status --json` (10s timeout); it never runs `tailscale up`, `down` or `set`;
@@ -262,7 +263,8 @@ skipped one by one with a warning in the daemon log.
   `/Applications/Tailscale.app/Contents/MacOS/Tailscale`;
 - the id is the first label of the MagicDNS name, else the lowercased hostname. The address is the MagicDNS name
   when MagicDNS is on, else the first Tailscale IPv4 address (the first Tailscale IP if there is none);
-- tags lose their `tag:` prefix; `Self` is never listed;
+- tags lose their `tag:` prefix; `Self` is never listed, and neither are other users' devices that appear only
+  because you shared this machine with them (`ShareeNode`; `tailscale status` hides them too);
 - with no filter and no global allow, every peer is discover-only.
 
 **DNS TXT, `bf1` format** (`type = "dns"`, trust 3). One index record, then one record per node:
@@ -279,8 +281,9 @@ _bifrost.agent-02.example.com. TXT "v=bf1 tags=dev"
   domain. There are at most 256 nodes, and every name is queried absolute (no search domains).
 - A record over 2 KiB, a duplicate key, or any key that fails validation (e.g. `host=-oProxyCommand=…`) rejects
   the **whole node**. Two different bf1 records for one node are ambiguous, and the node is skipped.
-- Changes show up after the record TTL (the resolver caches). DNSSEC and the inline root-record form of PRD §6.3
-  are not supported.
+- Changes show up on the first refresh after the record TTL (resolvers cache). Without `nameservers`, the system
+  resolver config is re-read on every refresh, so a network or VPN change is picked up. DNSSEC and the inline
+  root-record form of PRD §6.3 are not supported.
 
 **HTTP JSON** (`type = "http"`, trust 2): `GET url` with your `headers`, which may use `${VAR}` for secrets.
 

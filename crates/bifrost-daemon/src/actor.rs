@@ -163,7 +163,8 @@ impl Drop for Task {
 struct Provider {
     cfg: ProviderConfig,
     task_gen: u64,
-    /// None when build_provider failed: no task, so warm-up waits for the grace period (B11)
+    /// None when build_provider failed: no task, so warm-up waits for the grace period (B11); the next apply,
+    /// an unchanged reload included, retries the build
     task: Option<Task>,
     notify: Arc<Notify>,
     refreshes: u64,
@@ -528,7 +529,7 @@ impl Actor {
                 last_error: None,
                 reported: false,
             });
-            if p.task_gen == 0 || p.cfg != *pc {
+            if p.task.is_none() || p.cfg != *pc {
                 p.cfg = pc.clone();
                 p.task_gen += 1;
                 self.start_provider(&mut p);
@@ -1173,7 +1174,7 @@ pub(crate) mod tests {
     use bifrost_core::{BoxFuture, MountRequest, Name};
     use std::path::Path;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
     use std::time::{Duration, Instant};
 
     /// A FakeDriver named "sshfs" (the default auto order picks it) that counts inspects and can slow unmounts.
@@ -1246,6 +1247,7 @@ pub(crate) mod tests {
         pub drv: Arc<TestDriver>,
         pub disc: Arc<FakeDiscovery>,
         pub builds: Arc<AtomicUsize>,
+        pub fail_build: Arc<AtomicBool>,
     }
 
     pub(crate) fn rig(name: &str) -> Rig {
@@ -1261,6 +1263,7 @@ pub(crate) mod tests {
                 result: Mutex::new(Err(DiscoveryError::Failed("no result set".into()))),
             }),
             builds: Arc::new(AtomicUsize::new(0)),
+            fail_build: Arc::default(),
         }
     }
 
@@ -1282,10 +1285,14 @@ pub(crate) mod tests {
         }
         pub fn deps(&self) -> Deps {
             let (drv, disc, builds) = (self.drv.clone(), self.disc.clone(), self.builds.clone());
+            let fail = self.fail_build.clone();
             Deps {
                 drivers: Arc::new(move |_| vec![drv.clone() as Arc<dyn MountDriver>]),
                 build_provider: Arc::new(move |_| {
                     builds.fetch_add(1, SeqCst);
+                    if fail.load(SeqCst) {
+                        return Err("build failed".into());
+                    }
                     Ok(disc.clone() as Arc<dyn DiscoveryProvider>)
                 }),
             }
@@ -1952,6 +1959,21 @@ pub(crate) mod tests {
             .until("respawned", |s| s.providers[0].last_error.is_some())
             .await;
         assert_eq!((s.machines.len(), s.providers[0].machines), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn reload_retries_failed_provider_build() {
+        let r = rig("rebuild");
+        r.fail_build.store(true, SeqCst);
+        r.set_disc(Ok(vec![obs("m1", "10.0.0.9")]));
+        let mut h = r.start(r.cfg(RECON, FAKE), true, &[], &[]);
+        h.until("build failed", |s| s.providers[0].last_error.is_some())
+            .await;
+        // B11: no task; an unchanged reload (SIGHUP, `bifrost config reload`) retries the build
+        r.fail_build.store(false, SeqCst);
+        assert!(h.reload(r.cfg(RECON, FAKE)).await.ok);
+        h.until("m1", |s| s.machines.len() == 1).await;
+        assert_eq!(r.builds.load(SeqCst), 2);
     }
 
     #[tokio::test]

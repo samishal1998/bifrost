@@ -8,11 +8,11 @@ config_p07() {
   printf '[[discovery]]\ntype = "tailscale"\n'
 }
 
-# the daemon's tailscale machine ids / the distinct first DNSName labels from the CLI (Self excluded)
+# the daemon's tailscale machine ids / the distinct first DNSName labels from the CLI (Self and sharee nodes excluded)
 p07_ids() { bifrost --json machines | jq -r '.[] | select(.source == "tailscale") | .id' | sort -u; }
 p07_want() {
   tailscale status --json |
-    jq -r '.Peer // {} | .[] | .DNSName | split(".")[0] | ascii_downcase | select(. != "")' | sort -u
+    jq -r '.Peer // {} | .[] | select(.ShareeNode | not) | .DNSName | split(".")[0] | ascii_downcase | select(. != "")' | sort -u
 }
 p07_some() { [[ -n $(p07_ids) ]]; }
 p07_discovered() {

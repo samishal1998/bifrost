@@ -26,32 +26,38 @@ const MAX_NODES: usize = 256;
 pub struct DnsProvider {
     name: String,
     domain: Host,
-    resolver: TokioResolver,
+    /// Some for explicit `nameservers` only. None = the system resolver, whose config (resolv.conf, or
+    /// SCDynamicStore on macOS) is read afresh on every refresh: a snapshot taken at start would keep querying
+    /// the old servers after a network change, and a daemon started offline would never get one.
+    resolver: Option<TokioResolver>,
 }
 
 impl DnsProvider {
     pub fn new(name: String, domain: Host, nameservers: Vec<SocketAddr>) -> Result<Self, String> {
-        let b = if nameservers.is_empty() {
-            TokioResolver::builder_tokio().map_err(|e| e.to_string())? // C8: NetError → String
-        } else {
-            let ns = nameservers
-                .iter()
-                .map(|sa| {
-                    let mut n = NameServerConfig::udp_and_tcp(sa.ip());
-                    for c in &mut n.connections {
-                        c.port = sa.port();
-                    }
-                    n
-                })
-                .collect();
-            Resolver::builder_with_config(
-                ResolverConfig::from_name_servers(ns),
-                TokioRuntimeProvider::default(),
-            )
-        };
+        if nameservers.is_empty() {
+            return Ok(Self {
+                name,
+                domain,
+                resolver: None,
+            });
+        }
+        let ns = nameservers
+            .iter()
+            .map(|sa| {
+                let mut n = NameServerConfig::udp_and_tcp(sa.ip());
+                for c in &mut n.connections {
+                    c.port = sa.port();
+                }
+                n
+            })
+            .collect();
         // no options_mut() lines (D1): ResolverOpts::default() is already 5s timeout × 2 attempts.
         // The cache stays on and honours the record TTLs.
-        let resolver = b.build().map_err(|e| e.to_string())?;
+        let b = Resolver::builder_with_config(
+            ResolverConfig::from_name_servers(ns),
+            TokioRuntimeProvider::default(),
+        );
+        let resolver = Some(b.build().map_err(|e| e.to_string())?); // C8: NetError → String
         Ok(Self {
             name,
             domain,
@@ -74,8 +80,17 @@ impl DiscoveryProvider for DnsProvider {
     fn discover(&self) -> BoxFuture<'_, Result<Vec<MachineObservation>, DiscoveryError>> {
         Box::pin(async move {
             let (provider, d) = (self.name.as_str(), self.domain.as_str());
+            // ponytail: the system resolver is rebuilt every refresh, so hickory's cache never outlives one (the
+            // registry does expiry; the stub or upstream still caches); reuse it while the config is unchanged if
+            // the extra queries ever matter
+            let resolver = match &self.resolver {
+                Some(r) => r.clone(),
+                None => TokioResolver::builder_tokio()
+                    .and_then(|b| b.build())
+                    .map_err(|e| DiscoveryError::Failed(clean(&e.to_string(), 512)))?,
+            };
             let q = format!("_bifrost.{d}.");
-            let index = match txt(&self.resolver, &q).await {
+            let index = match txt(&resolver, &q).await {
                 Ok(l) => l,
                 // an empty view, not a failure: with the expiry registry this causes no churn
                 Err(e) if e.is_no_records_found() => {
@@ -91,7 +106,7 @@ impl DiscoveryProvider for DnsProvider {
             }
             let mut set = JoinSet::new();
             for n in nodes {
-                let (r, q) = (self.resolver.clone(), format!("_bifrost.{n}.{d}."));
+                let (r, q) = (resolver.clone(), format!("_bifrost.{n}.{d}."));
                 set.spawn(async move {
                     let l = txt(&r, &q).await.map_err(|e| e.to_string());
                     (n, q, l)
@@ -555,6 +570,17 @@ mod tests {
         assert_eq!(ttl(now + s(10), now + s(4)), Some(s(4)));
         assert_eq!(ttl(now + s(3), now + s(8)), Some(s(3)));
         assert_eq!(ttl(now, now + s(8)), Some(Duration::ZERO));
+    }
+
+    #[tokio::test]
+    async fn system_resolver_read_per_refresh() {
+        // nothing read at build time: an offline start (no nameserver yet) or a later network change can't pin
+        // the provider to a dead or stale resolver; discover() reads the system config each refresh
+        let p = DnsProvider::new("dns".into(), h("test.bifrost"), vec![]).unwrap();
+        assert!(p.resolver.is_none());
+        let ns = "127.0.0.1:5353".parse().unwrap();
+        let p = DnsProvider::new("dns".into(), h("test.bifrost"), vec![ns]).unwrap();
+        assert!(p.resolver.is_some()); // explicit nameservers: built once, cache kept
     }
 
     /// Against the p08 zone: `T=$(mktemp -d); source tests/e2e/lib.sh; source tests/e2e/p08_dns.sh;
