@@ -453,9 +453,8 @@ mod tests {
 
     #[tokio::test]
     async fn transport_error_names_cause_not_url() {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/inv?token=s3cret", l.local_addr().unwrap());
-        drop(l); // nothing listens any more
+        // port 1: privileged and outside the ephemeral range, so no serve() of a parallel test can own it
+        let url = "http://127.0.0.1:1/inv?token=s3cret".to_string();
         let Err(DiscoveryError::Failed(m)) = provider(url, &[]).discover().await else {
             panic!("expected Failed");
         };
