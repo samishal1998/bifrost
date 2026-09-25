@@ -33,7 +33,7 @@ struct Cli {
     // no clap `env`: it rejects an empty value; paths::config_path() reads it, empty = unset
     #[arg(long, global = true)]
     config: Option<PathBuf>,
-    /// Daemon socket [default: $BIFROST_SOCKET, else $XDG_RUNTIME_DIR/bifrost/bifrost.sock]
+    /// Daemon socket [default: $BIFROST_SOCKET, else $XDG_RUNTIME_DIR/bifrost/bifrost.sock; macOS ~/Library/Caches/bifrost/bifrost.sock]
     // no clap `env`, as for --config: paths::socket_path() reads it, empty = unset
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
