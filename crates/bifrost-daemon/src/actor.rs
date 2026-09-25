@@ -313,13 +313,18 @@ impl Actor {
                 .chain(std::iter::from_fn(|| rx.try_recv().ok()))
                 .collect();
             let now = Instant::now();
+            // the whole batch is handled first, so a MountDone queued behind a Shutdown still reaches state.json
+            let mut stop = None;
             for m in msgs {
-                if let Msg::Shutdown(reply) = m {
-                    self.shutdown(&mut rx).await;
-                    let _ = reply.send(());
-                    return;
+                match m {
+                    Msg::Shutdown(reply) => stop = Some(reply),
+                    m => self.handle(m, now),
                 }
-                self.handle(m, now);
+            }
+            if let Some(reply) = stop {
+                self.shutdown(&mut rx).await;
+                let _ = reply.send(());
+                return;
             }
             let now = Instant::now();
             self.pass(now);
