@@ -66,6 +66,9 @@ for f in "${list[@]}"; do
 done
 
 cargo build --workspace
+# Snapshot the binaries into $T: worktrees share CARGO_TARGET_DIR (plan P2), so a parallel cargo build elsewhere
+# could otherwise replace target/debug/bifrostd in the middle of this run.
+mkdir -p "$T/bin" && cp "$BF_BIN"/{bifrost,bifrostd,bifrost-tui} "$T/bin/" && PATH=$T/bin:$PATH
 start_sshd
 for p in "${phases[@]}"; do
   if declare -F "setup_$p" >/dev/null; then "setup_$p"; fi

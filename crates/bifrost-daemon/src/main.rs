@@ -258,7 +258,7 @@ fn lock(state_dir: &Path) -> Result<(File, u32), String> {
     match f.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
-            return Err(format!("bifrostd already running (lock {})", p.display()));
+            return Err(format!("already running (lock {})", p.display()));
         }
         Err(TryLockError::Error(e)) => return Err(at(e)),
     }

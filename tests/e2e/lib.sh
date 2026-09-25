@@ -36,7 +36,7 @@ start_daemon() {
     [[ $v == "$T"/* ]] || { echo "start_daemon: $v is outside \$T" >&2; return 1; }
   done
   [[ -f $BIFROST_CONFIG ]] || { echo "start_daemon: $BIFROST_CONFIG missing (daemon would default to ~/machines)" >&2; return 1; }
-  bifrostd >>"$T/d.log" 2>&1 &
+  bifrostd >>"$T/d.log" 2>&1 9>&- &   # 9>&-: the run lock must not leak into the daemon or its sshfs children
   DPID=$!
   wait_until 10 bifrost daemon status
 }

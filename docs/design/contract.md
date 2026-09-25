@@ -1856,3 +1856,30 @@ These are binding for S2 onward and win over earlier text where they differ.
 7. The S1-A Display strings for verdicts, actions, wait reasons and `Reason` are final. S2-F golden tests lock them in.
 8. A graceful held unmount of an **adopted** mount that has no candidate waits for `ready`; `--force` still goes through row 3. Accepted.
 9. `api.rs` keeps `#![allow(dead_code)]` until S2-E's `main.rs` serves `router()`. The S2 merge agent deletes that line, and the ones in `actor.rs`, once they are no longer needed.
+
+## Orchestrator sign-offs (after S2 / Milestone 1)
+
+M1 gate: `tests/e2e/run.sh m1` passed 63/63 on its first run (commit 359db31).
+
+1. **Accepted S2-E choices:**
+   - the tickers are spawned in the actor's config-apply path, so interval changes take effect on reload;
+   - `POST /v1/reconcile` replies after the pass that follows the next driver re-probe;
+   - the next deadline is measured from the last pass's `now`;
+   - state.json is written synchronously on the actor;
+   - generations are seeded per created runtime;
+   - inspect has a 30s outer timeout.
+2. **Open, for the S4 final review:** if an executor task panics, its runtime stays in flight (row 1) forever. Convert a `JoinError` into `MountDone`/`UnmountDone` Err (or Degraded) so the mount recovers.
+3. **Accepted S2-F choices:**
+   - doctor exits 1 on a Config ✗, on no usable driver, or on a B7 hint; one unavailable driver alone does not fail it;
+   - `ClientError::Io` exits 3;
+   - the NAME column prints the machine id;
+   - the local probe uses placeholder `DriverSettings`. **So S3-J's rclone probe must look only at binaries and flags, never at the settings.**
+4. **E2E harness rules:**
+   - Run with `TMPDIR` unset, because `$T/bf.sock` must be ≤103 bytes, and with `CARGO_TARGET_DIR` exported.
+   - One run at a time: `run.sh` takes `flock -n /tmp/bf-e2e.lock` and exits 2 if another run holds it. Wait and retry; never delete the lock.
+   - The daemon is started with `9>&-`, so the lock can't leak into sshfs children.
+   - `run.sh` copies the binaries into `$T/bin` after building, so parallel worktree builds can't swap them mid-run.
+   - Phase-file convention (the `run.sh` header): `<p>` is the stem before the first `_`, `check_<p>` is required, `setup_<p>`/`config_<p>` are optional.
+   - The template uses `$E2E` for paths.
+   - Only ONE phase fragment may define `[policy.*]` tables, and that is p08 (B5).
+5. The second-instance message no longer has a doubled prefix ("bifrostd: already running (lock …)").
