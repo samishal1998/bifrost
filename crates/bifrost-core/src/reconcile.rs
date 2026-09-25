@@ -304,6 +304,9 @@ impl MountRuntime {
         if generation != self.generation || self.phase != Phase::Mounted {
             return None;
         }
+        // a passed unmount retry gates nothing in decide; dropping it here keeps an unmount that is no longer
+        // wanted (a busy remount whose spec reverted) from pinning last_error and next_wakeup in the past
+        self.unmount_retry_at = self.unmount_retry_at.filter(|t| *t > now);
         let mount = self.id();
         match s {
             MountState::Healthy => {
@@ -314,7 +317,7 @@ impl MountRuntime {
                     self.failures = 0;
                 }
                 self.degraded_since = None;
-                // keep an unmount error while its retry is pending, so a busy remount keeps saying why (C4)
+                // keep an unmount error while its retry is still ahead, so a busy remount keeps saying why (C4)
                 if self.unmount_retry_at.is_none() {
                     self.last_error = None;
                 }
@@ -358,6 +361,7 @@ impl MountRuntime {
         self.mounted_at = None;
         self.degraded_since = None;
         self.unmount_retry_at = None;
+        self.last_error = None; // a stale unmount error; callers that fail set theirs after this
         self.force_requested = false;
         self.adopted = false;
     }
@@ -570,24 +574,23 @@ pub fn plan(i: &PlanInput) -> Vec<(MountId, Action)> {
         .collect()
 }
 
-/// Earliest deadline a pass may act on: `mount_retry_at` while Absent (row 8), `unmount_retry_at` while Mounted
-/// (⊳U), `degraded_since + grace` while Mounted and Degraded (row 12). The frozen signature has no `now`, so a
-/// deadline that has already passed without its row acting (Absent but offline or without a driver; an unmount
-/// backoff whose unmount is no longer wanted) is still returned: the caller must not sleep until an instant
-/// ≤ now in a loop.
+/// Earliest deadline a pass may act on: `mount_retry_at` while Absent (row 8); while Mounted, `unmount_retry_at`
+/// (⊳U gates every Mounted row that acts, row 12 included), else `degraded_since + grace` when Degraded (row 12).
+/// ponytail: no `now` in the frozen signature, so a deadline that passed without its row acting is still returned
+/// (Absent but offline or without a driver; Degraded past grace while not desired in warm-up; a no-longer-wanted
+/// unmount retry until the next health probe drops it). The caller must keep only deadlines > now and must not
+/// sleep until an instant ≤ now in a loop; upgrade: take `now` and filter here.
 pub fn next_wakeup(runtimes: &BTreeMap<MountId, MountRuntime>, grace: Duration) -> Option<Instant> {
     (runtimes.values())
         .flat_map(|rt| match rt.phase {
-            Phase::Absent => [rt.mount_retry_at, None],
-            Phase::Mounted => [
-                rt.unmount_retry_at,
+            Phase::Absent => rt.mount_retry_at,
+            Phase::Mounted => rt.unmount_retry_at.or_else(|| {
                 (rt.degraded_since)
                     .filter(|_| matches!(rt.health, Health::Degraded(_)))
-                    .and_then(|t| t.checked_add(grace)),
-            ],
-            Phase::Mounting | Phase::Unmounting => [None, None],
+                    .and_then(|t| t.checked_add(grace))
+            }),
+            Phase::Mounting | Phase::Unmounting => None,
         })
-        .flatten()
         .min()
 }
 
@@ -1553,6 +1556,37 @@ mod tests {
         assert_eq!(rt.failures, 2);
     }
 
+    /// A busy remount whose spec then reverts (DNS flap) is no longer wanted: once its retry time passes, a
+    /// healthy probe drops the timer and the busy text, so neither lingers nor keeps `next_wakeup` in the past.
+    #[test]
+    fn expired_unmount_retry_clears_busy_error() {
+        let now = Instant::now();
+        let c = cand("a");
+        let mut rt = mounted(&c, Health::Healthy);
+        let g = rt.begin(Phase::Unmounting);
+        rt.unmount_done(g, Reason::SpecChanged, Err(MountError::Busy), now, &T, 0);
+        assert_eq!(dec(Some(&c), &rt, now), Action::NoOp); // reverted: row 14
+        rt.health(g, MountState::Healthy, now + bo(1), &T, 0);
+        assert_eq!(
+            (rt.last_error.as_deref(), rt.unmount_retry_at),
+            (None, None)
+        );
+        assert_eq!(
+            next_wakeup(&BTreeMap::from([(id("a"), rt.clone())]), GRACE),
+            None
+        );
+        // a busy unmount that later succeeds leaves no stale error behind (would read Failed while Absent)
+        let g = rt.begin(Phase::Unmounting);
+        rt.unmount_done(g, Reason::SpecChanged, Err(MountError::Busy), now, &T, 0);
+        let g = rt.begin(Phase::Unmounting);
+        rt.unmount_done(g, Reason::SpecChanged, Ok(()), now + bo(2), &T, 0);
+        assert_eq!(rt.last_error, None);
+        assert_eq!(
+            mount_availability(Some(&rt), Some(&c)),
+            Availability::Eligible
+        );
+    }
+
     #[test]
     fn grace_unmount_sets_offline() {
         let now = Instant::now();
@@ -1842,6 +1876,13 @@ mod tests {
         assert_eq!(next_wakeup(&rts, GRACE), Some(now + secs(30)));
         rts.remove(&id("a"));
         assert_eq!(next_wakeup(&rts, GRACE), None);
+        // past grace but row 12 waits out ⊳U: wake at the unmount retry, not the passed grace deadline
+        let held_back = MountRuntime {
+            unmount_retry_at: Some(now + secs(9)),
+            ..degraded(&c, now - GRACE - secs(5))
+        };
+        let rts = BTreeMap::from([(id("e"), held_back)]);
+        assert_eq!(next_wakeup(&rts, GRACE), Some(now + secs(9)));
     }
 
     #[test]
