@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
     about = "Bifröst: remote machines as local folders"
 )]
 struct Cli {
-    /// Config file [default: ~/.config/bifrost/config.toml]
-    #[arg(long, global = true, env = "BIFROST_CONFIG")]
+    /// Config file [default: $BIFROST_CONFIG, else ~/.config/bifrost/config.toml]
+    // no clap `env`: it rejects an empty value; paths::config_path() reads it, empty = unset
+    #[arg(long, global = true)]
     config: Option<PathBuf>,
     /// Print JSON instead of text
     #[arg(long, global = true)]
@@ -81,7 +82,7 @@ fn config_check(path: &Path, json: bool) -> i32 {
                 path.display(),
                 c.machines.len(),
                 c.providers.len(),
-                c.root.display()
+                bifrost_core::validate::clean(&c.root.display().to_string(), 512)
             );
             0
         }

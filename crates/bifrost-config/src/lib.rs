@@ -6,7 +6,9 @@ mod raw;
 use bifrost_core::policy::{Match, Policy, ProviderFilter};
 use bifrost_core::reconcile::{MountTemplate, StaticMount};
 use bifrost_core::registry::Source;
-use bifrost_core::validate::{Cidr, Glob, RemotePath, meta_key, native_id, parse_duration, tag};
+use bifrost_core::validate::{
+    Cidr, Glob, RemotePath, clean, meta_key, native_id, parse_duration, tag,
+};
 use bifrost_core::{
     DriverSelector, Host, MachineId, MachineObservation, Metadata, MountHints, Name, User,
 };
@@ -161,9 +163,18 @@ pub fn parse(
             );
             format!(":{line}:{col}")
         });
+        // a string value in a shape error may be a secret (`headers = "Bearer …"`): drop it
+        let m = e.message();
+        let m = match (
+            m.starts_with("invalid type: string \""),
+            m.rfind("\", expected"),
+        ) {
+            (true, Some(i)) => format!("invalid type: string{}", &m[i + 1..]),
+            _ => m.to_string(),
+        };
         vec![ConfigError {
             path: format!("{}{at}", path.display()),
-            message: e.message().trim().replace('\n', " "),
+            message: clean(&m.trim().replace('\n', " "), 512),
         }]
     })?;
     let mut v = V {
@@ -242,7 +253,7 @@ impl V<'_> {
     fn err(&mut self, path: &str, message: impl Display) {
         self.errs.push(ConfigError {
             path: path.into(),
-            message: message.to_string(),
+            message: clean(&message.to_string(), 512),
         });
     }
 
@@ -347,8 +358,11 @@ impl V<'_> {
     }
 
     fn root(&mut self, s: &str) -> Option<PathBuf> {
-        let r = PathBuf::from(self.expand("mount.root", s)?);
-        let why = if !r.is_absolute() {
+        let s = self.expand("mount.root", s)?;
+        let r = PathBuf::from(&s);
+        let why = if s.contains(char::is_control) {
+            "must not contain control characters"
+        } else if !r.is_absolute() {
             "must be an absolute path"
         } else if r.components().any(|c| c == Component::ParentDir) {
             "must not contain a '..' component"
@@ -367,6 +381,8 @@ impl V<'_> {
         let p = self.expand("mount.ssh_config", s)?;
         let why = if p.contains('"') {
             "must not contain '\"' (it is quoted inside --sftp-ssh)"
+        } else if p.contains(char::is_control) {
+            "must not contain control characters"
         } else if !Path::new(&p).is_absolute() {
             "must be an absolute path"
         } else if !Path::new(&p).exists() {
@@ -774,11 +790,15 @@ impl V<'_> {
     }
 }
 
-/// `~` / `~/` → $HOME; `$NAME` / `${NAME}` → env; `$$` → `$`. Undefined ⇒ error, never "".
+/// `~` / `~/` → $HOME; `$NAME` / `${NAME}` → env; `$$` → `$`. Undefined or empty ⇒ error, never "".
 /// Errors never echo the input: header values are secrets.
 // ponytail: hand-rolled ~/$VAR expansion (§15 #4): no ~user, no ${VAR:-default}; add them if configs need them
 fn expand(s: &str, env: Env) -> Result<String, String> {
-    let var = |k: &str| env(k).ok_or_else(|| format!("undefined variable ${k}"));
+    let var = |k: &str| {
+        env(k)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("undefined variable ${k}"))
+    };
     let (mut out, mut rest) = match s.strip_prefix('~') {
         Some(r) if r.is_empty() || r.starts_with('/') => (var("HOME")?, r),
         _ => (String::new(), s),
@@ -1375,6 +1395,17 @@ host = "a"
         let e = p("[[machines]]\nname = \"a\"\nhost = \"a\"\nport = \"22\"\nremote = \"~\"\n")
             .unwrap_err();
         assert!(e[0].path.starts_with("/c.toml:4:"), "{e:#?}");
+        // a shape error never echoes a string value: it may be a secret
+        let e = p("[[discovery]]\ntype=\"http\"\nurl=\"https://x\"\nheaders=\"Bearer tok\"\n")
+            .unwrap_err();
+        assert!(e[0].message.contains("expected"), "{e:#?}");
+        assert!(!e.iter().any(|e| e.message.contains("tok")), "{e:#?}");
+        // terminal escapes are cleaned and the length is capped (A8)
+        let e = p("\"\\u001b[31mEVIL\" = 1\n").unwrap_err();
+        assert!(e[0].message.contains("EVIL"), "{e:#?}");
+        assert!(!e[0].message.contains(char::is_control), "{e:#?}");
+        let e = p(&format!("{} = 1\n", "k".repeat(4000))).unwrap_err();
+        assert!(e[0].message.chars().count() <= 512, "{e:#?}");
     }
 
     #[test]
@@ -1608,6 +1639,9 @@ interval = "0s"
             let e = errs(&format!("[mount]\nroot = {root:?}\n"));
             assert_has(&e, "mount.root", why);
         }
+        // control characters (OSC title injection) never reach argv or the ok line
+        let e = errs("[mount]\nroot = \"/x/\\u001b]0;pwned\\u0007m\"\n");
+        assert_has(&e, "mount.root", "control");
         assert_eq!(
             ok("[mount]\nroot = \"/home/t/m\"\n").root,
             Path::new("/home/t/m")
@@ -1657,6 +1691,19 @@ interval = "0s"
         let e = parse("", Path::new("/c.toml"), &noenv).unwrap_err();
         assert_eq!(e[0].path, "mount.root");
         assert!(e[0].message.contains("undefined variable $HOME"), "{e:#?}");
+        // an empty variable is undefined too: HOME="" must not turn "~/machines" into "/machines"
+        let e = parse("", Path::new("/c.toml"), &|k: &str| {
+            (k == "HOME").then(String::new)
+        })
+        .unwrap_err();
+        assert_eq!(e[0].path, "mount.root", "{e:#?}");
+        let e = parse(
+            "[[discovery]]\ntype = \"http\"\nurl = \"https://x\"\nheaders = { X-A = \"Bearer $TOK\" }\n",
+            Path::new("/c.toml"),
+            &env(HOME, &[("TOK", "")]),
+        )
+        .unwrap_err();
+        assert!(e[0].path.starts_with("discovery[0].headers"), "{e:#?}");
         // malformed references
         for bad in ["/x/$", "/x/${", "/x/${}", "/x/${A-B}", "/x/$-"] {
             let e = errs(&format!("[mount]\nroot = {bad:?}\n"));
@@ -1850,6 +1897,13 @@ exclude_metadata = { k = "x" }
                 &env(h, &[]),
             )
         };
+        let e = parse(
+            "[mount]\nssh_config = \"/x\\u0007\"\n",
+            Path::new("/c.toml"),
+            &env(h, &[]),
+        )
+        .unwrap_err();
+        assert!(e[0].message.contains("control"), "{e:#?}");
         let e = cfg("~/bad\"cfg").unwrap_err();
         assert!(
             e[0].path == "mount.ssh_config" && e[0].message.contains('"'),

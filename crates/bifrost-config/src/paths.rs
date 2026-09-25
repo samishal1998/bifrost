@@ -12,8 +12,12 @@ fn xdg(k: &str) -> Option<PathBuf> {
     var(k).filter(|p| p.is_absolute())
 }
 
+/// Panics rather than resolve a default against the cwd (a daemon started in /tmp, a client in a hostile dir).
+/// Only reached when the BIFROST_* override is unset.
 fn home() -> PathBuf {
-    std::env::home_dir().unwrap_or_default()
+    std::env::home_dir()
+        .filter(|h| h.is_absolute())
+        .expect("HOME is not an absolute path")
 }
 
 /// $BIFROST_CONFIG | ~/.config/bifrost/config.toml

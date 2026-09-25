@@ -86,6 +86,33 @@ host = "a"
     );
     assert_eq!(String::from_utf8(o.stdout).unwrap(), want);
 
+    // an empty BIFROST_CONFIG means unset (like paths::config_path), not a clap usage error
+    std::fs::create_dir_all(dir.join(".config/bifrost")).unwrap();
+    std::fs::copy(&good, dir.join(".config/bifrost/config.toml")).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_bifrost"))
+        .args(["config", "check"])
+        .env("HOME", &dir)
+        .env("BIFROST_CONFIG", "")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+
+    // a relative HOME never yields a cwd-relative default path
+    std::fs::create_dir_all(dir.join("rel/.config/bifrost")).unwrap();
+    std::fs::copy(&good, dir.join("rel/.config/bifrost/config.toml")).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_bifrost"))
+        .args(["config", "check"])
+        .current_dir(&dir)
+        .env("HOME", "rel")
+        .env_remove("BIFROST_CONFIG")
+        .output()
+        .unwrap();
+    assert!(!o.status.success(), "{o:?}");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("HOME is not an absolute path"),
+        "{o:?}"
+    );
+
     // missing file is an error, not the default config
     let o = check(&dir.join("missing.toml"), &dir);
     assert_eq!(o.status.code(), Some(1));
