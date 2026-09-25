@@ -188,7 +188,7 @@ metadata = { env = "ci" }
 
 [[machines.mounts]]
 remote = "/home/sami"
-local = "build"
+local = "build"                               # mount id = local; it shadows the machine id for bifrost mount/unmount
 driver = "sshfs"
 
 [[machines.mounts]]
@@ -340,8 +340,8 @@ Global flags: `--json` (print the API's JSON), `--socket PATH`, `--config PATH` 
 | `bifrost machines` / `machines list` | `NAME SOURCE ADDRESS STATE MOUNTED` |
 | `bifrost machines show <id>` | verdict, address, tags, metadata, shadowed providers, mounts |
 | `bifrost mounts` | `ID MACHINE DRIVER STATE LOCAL REMOTE` (+ `ERROR`) |
-| `bifrost mount <target> [--no-wait]` | a mount id, or a machine id (all its mounts): clear the hold, retry now, wait |
-| `bifrost unmount <target> [--force] [--no-wait]` | unmount and hold down until `bifrost mount`; `--force` = lazy detach |
+| `bifrost mount <target> [--no-wait]` | a mount id, or a machine id (all its mounts; a mount id wins, see below): clear the hold, retry now, wait |
+| `bifrost unmount <target> [--force] [--no-wait]` | same targets as `mount`; unmount and hold down until `bifrost mount`; `--force` = lazy detach |
 | `bifrost discover` | refresh every provider now |
 | `bifrost reconcile` | re-probe drivers, run one pass, print its plan |
 | `bifrost drivers` | driver probes and the `auto` choice (probed locally when the daemon is down) |
@@ -349,6 +349,10 @@ Global flags: `--json` (print the API's JSON), `--socket PATH`, `--config PATH` 
 | `bifrost config check [PATH]` | validate a config file, no daemon needed |
 | `bifrost config reload` | make the daemon reload now |
 | `bifrost daemon status` | running or not |
+
+An id that is also a mount's id means that mount only, even when it is a machine id too. With the example config
+above, `bifrost unmount build` unmounts `build` and leaves `build-artifacts` mounted; name the others as well
+(`bifrost unmount build-artifacts`). The TUI's `m`/`u`/`U` on a machine row always cover all its mounts.
 
 Exit codes: `0` ok · `1` failed (API error, mount failed, unmount busy, invalid config; for `doctor`: a missing or
 invalid config file, no usable driver, or the macOS permission hint) · `2` usage · `3` daemon not reachable.
