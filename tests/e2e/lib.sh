@@ -4,6 +4,9 @@
 # Binaries come from the shared cargo target dir (P2).
 BF_BIN=${BF_BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug}
 PATH=$BF_BIN:$PATH
+# every CLI call is bounded (mount/unmount poll ≤60s): a wedged daemon gives FAIL + log tail, not a hung gate.
+# `timeout` runs the binary from PATH, so prefix assignments (VAR=x bifrost ...) and exit codes pass through.
+bifrost() { timeout 75 bifrost "$@"; }
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # wait_until SECS CMD... : run CMD every 0.5s until it succeeds; 1 after SECS.
@@ -32,6 +35,7 @@ start_daemon() {
   for v in "$BIFROST_CONFIG" "$BIFROST_STATE_DIR" "$BIFROST_SOCKET"; do
     [[ $v == "$T"/* ]] || { echo "start_daemon: $v is outside \$T" >&2; return 1; }
   done
+  [[ -f $BIFROST_CONFIG ]] || { echo "start_daemon: $BIFROST_CONFIG missing (daemon would default to ~/machines)" >&2; return 1; }
   bifrostd >>"$T/d.log" 2>&1 &
   DPID=$!
   wait_until 10 bifrost daemon status
@@ -41,6 +45,9 @@ start_daemon() {
 stop_daemon() {
   [[ -n ${DPID:-} ]] || return 0
   kill -TERM "$DPID" 2>/dev/null || true
+  local i # bounded: a daemon that ignores SIGTERM gets SIGKILL after 20s instead of hanging the run
+  for ((i = 0; i < 40; i++)); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.5; done
+  kill -KILL "$DPID" 2>/dev/null || true
   wait "$DPID" 2>/dev/null || true
   DPID=
 }
@@ -71,3 +78,49 @@ EOF
 
 # stop_sshd : remove the container (host keys live in the image, so a restart keeps known_hosts valid).
 stop_sshd() { docker rm -f bf-e2e-sshd >/dev/null 2>&1 || true; }
+
+# --- assertions for the run.sh phases ---
+
+FAILS=0
+# ok DESC CMD... : run CMD, print "PASS: DESC" or "FAIL: DESC" (plus CMD's last output lines); a FAIL is
+# counted and the run goes on. CMD runs in a subshell, so it can't change shell state (DPID etc.).
+ok() {
+  local d=$1 out; shift
+  if out=$("$@" 2>&1); then
+    echo "PASS: $d"
+  else
+    echo "FAIL: $d"
+    [[ -z $out ]] || tail -n 5 <<<"$out" | sed 's/^/  | /'
+    FAILS=$((FAILS + 1))
+  fi
+}
+not() { ! "$@"; }
+
+# state_is ID STATE : the mount's state is STATE.
+state_is() { [[ $(mstate "$1") == "$2" ]]; }
+
+# mjq ID FILTER : jq FILTER over the mount's MountDto is true, e.g. `mjq static1 .held`.
+mjq() { bifrost --json mounts | jq -e --arg id "$1" ".[] | select(.id == \$id) | $2" >/dev/null; }
+
+# events SEQ FILTER CMP : the count of status events with seq > SEQ whose .event matches FILTER satisfies CMP
+# ("> 0", "== 0"). The ring holds the running daemon instance's last 200 events.
+events() {
+  bifrost --json status |
+    jq -e --argjson s "$1" "[.events[] | select(.seq > \$s) | .event | select($2)] | length $3" >/dev/null
+}
+last_seq() { bifrost --json status | jq '[.events[].seq] | max // 0'; }
+
+# mnt_src PATH : "<fstype> <source>" of the mount at PATH (the mountinfo fields after the "-" separator).
+mnt_src() {
+  awk -v p="$1" '$5 == p { for (i = 7; i <= NF; i++) if ($i == "-") { print $(i + 1), $(i + 2); exit } }' \
+    /proc/self/mountinfo
+}
+
+# gone PATH : not a mount point, and the directory is removed.
+gone() { ! is_mounted "$1" && [[ ! -e $1 ]]; }
+
+# sig SIG PID : kill -SIG PID, only for a plain positive pid (an empty `mpid` never becomes a bare `kill`).
+sig() { [[ $2 =~ ^[1-9][0-9]*$ ]] && kill "-$1" "$2"; }
+
+# on_fuse CMD... : CMD on a FUSE path, SIGKILLed after 5s so a hung mount can't hang the run.
+on_fuse() { timeout -s KILL 5 "$@"; }

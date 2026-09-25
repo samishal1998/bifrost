@@ -1,0 +1,16 @@
+# E2E base config (contract §12). $E2E is the run's mktemp dir (bifrost-config expands $VAR); run.sh appends
+# each phase's config_<p> fragment. No [[machines]] here (static1 is p04's, B4) and no [policy.*] (p08's, B5).
+[mount]
+root = "$E2E/machines"
+ssh_config = "$E2E/ssh_config"
+
+[daemon]
+discovery_interval = "3s"
+health_interval = "2s"
+reconcile_interval = "5s"
+mount_timeout = "15s"
+
+[reconciliation]
+offline_grace_period = "20s"
+retry_initial = "1s"
+retry_max = "4s"
