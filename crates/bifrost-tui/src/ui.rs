@@ -186,7 +186,17 @@ pub fn render(app: &App, f: &mut Frame) {
                     let path =
                         (!log.path.is_empty()).then(|| Line::styled(c(&log.path), fg(STONE)));
                     let mut l: Vec<Line> = path.into_iter().collect();
-                    l.extend(log.lines.iter().map(|s| Line::raw(c(s))));
+                    // hard-wrapped here, not by Paragraph, so the tail scroll below counts the real rows
+                    // ponytail: splits by chars, so a line of wide glyphs may still clip; split by display width if that shows up
+                    let w = main.width.saturating_sub(2).max(1) as usize;
+                    for s in &log.lines {
+                        let chars: Vec<char> = c(s).chars().collect();
+                        let rows = chars.chunks(w).map(|r| Line::raw(String::from_iter(r)));
+                        l.extend(rows);
+                        if chars.is_empty() {
+                            l.push(Line::default());
+                        }
+                    }
                     l
                 }
                 _ => vec![Line::styled("loading …", fg(STONE))],
@@ -539,6 +549,20 @@ mod tests {
         let mut a = app(View::Mounts);
         a.popup = Some(Popup::Details("build-artifacts".into()));
         assert!(find(&draw(&a), "verdict   allowed (static)").is_some());
+    }
+
+    #[test]
+    fn logs_wrap_long_lines_and_follow_tail() {
+        let mut a = app(View::Logs);
+        let lines = (0..40).map(|i| format!("line {i}"));
+        a.log = Some(bifrost_core::api::LogDto {
+            mount: "agent-01".into(),
+            path: "/p/agent-01.log".into(),
+            lines: lines.chain([format!("{} END", "x".repeat(150))]).collect(),
+        });
+        let b = draw(&a);
+        assert!(find(&b, "END").is_some(), "a long line keeps its end");
+        assert!(find(&b, "line 39").is_some(), "the tail stays in view");
     }
 
     #[test]
