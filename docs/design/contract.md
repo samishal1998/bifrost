@@ -10,7 +10,7 @@ This contract keeps the structure of design B and fixes every defect the judges 
 | 2 | Force unmount does lazy detach and then kills the process group, losing writes that are in flight. | Force is `fusermount3 -u -z` (Linux) or `diskutil unmount force` (macOS), **with no kill**. After a lazy detach the child keeps serving open files and exits when the last reference closes. | 6 |
 | 3 | The `HostKeyChecking::AcceptNew` trust-on-first-use (TOFU) knob weakens host verification. | Enum and config key deleted. The constant `SSH_OPTS` never contains StrictHostKeyChecking, UserKnownHostsFile or GlobalKnownHostsFile. Test `argv_never_weakens_host_keys`. | 3, 6, 11 |
 | 4 | `stat` on the mount root is answered from the kernel and sshfs caches, so a dead remote looks healthy. | The probe looks up a unique nonexistent name, `<mnt>/.bifrost-probe-<nonce>`. rclone gets `--dir-cache-time=15s` as its ceiling. | 6 |
-| 5 | Warm-up treats an `Err` as "reported", so adopted tailscale mounts get unmounted. | `ready` requires a loaded config file and one **non-empty Ok** from every network provider, or `offline_grace_period` since start (A6, A18). | 5, 8 |
+| 5 | Warm-up treats an `Err` as "reported", so adopted tailscale mounts get unmounted. | `ready` requires a loaded config file and one **non-empty Ok** from every network provider, or `offline_grace_period` since the first successful config load (A6, A18). | 5, 8 |
 | 6 | Row 11 force-unmounts `Missing` mounts, and fusermount exits non-zero, which loops. | `Missing` is a state transition (to Absent with backoff), not an action. `unmount` is idempotent: if the path is not in the mount table afterwards, the result is Ok. | 5, 6 |
 | 7 | `generation` only bumps on spawn, so a late health result can land after an unmount. | `begin()` bumps `generation` for both mount and unmount. Provider results carry `task_gen`. | 5 |
 | 8 | A persistent `Override::Mounted` can mount a DiscoverOnly machine that has an untrusted address. | Removed. Only `held` (manual unmount) is persisted. `POST …/mount` clears a hold and returns **403** for anything that isn't a candidate. | 4, 8 |
@@ -19,7 +19,7 @@ This contract keeps the structure of design B and fixes every defect the judges 
 | 11 | Merging by provider config order lets untrusted DNS supply the connect host. | **Winner takes all by trust**: `Source.trust` ranks static 0 < tailscale 1 < http 2 < dns 3 (assigned by bifrost-config, B8). The selected observation's host, port, hints and metadata are the only ones used. | 4 |
 | 12 | Any provider's exclude or deny, or a DNS-published tag, could deny a static machine. | A provider `exclude` drops only that provider's observation. Global deny is evaluated against the selected (most trusted) observation, so a lower-trust source can't redirect or deny a machine that a more trusted source reports. | 4 |
 | 13 | `#[serde(transparent)]` newtypes bypass validators when state.json or DTOs are read. | `#[serde(try_from = "String", into = "String")]` on Name, Host, User, RemotePath and DriverSelector. | 2 |
-| 14 | A missing config makes the daemon exit, so PRD §31's plain `bifrostd` can't start. | Missing config means the empty default config plus a warning, and the poller adopts the file once it appears; `ready` stays false until a config file has loaded (A6). An invalid config means exit 2. | 8 |
+| 14 | A missing config makes the daemon exit, so PRD §31's plain `bifrostd` can't start. | Missing config means the empty default config (root `~/machines`) plus a warning, and the poller adopts the file once it appears, provided its `mount.root` equals that default root; any other root is rejected like every root change and needs a restart (A22). `ready` stays false until a config file has loaded (A6). An invalid config means exit 2. | 8 |
 | 15 | Knob and feature sprawl. | See §15 for everything cut: ssh timeouts, stat timeout, dir-cache time, http timeout, `auto_mount`, clap in the daemon, `/v1/snapshot`, the `events` CLI, FailureKind, the context parameters, and extra events. | 15 |
 | 16 | tokio types in core (`watch::Receiver` inside MountHandle), and HostKeyChecking in core. | Core depends only on serde and thiserror. Child exit reaches the daemon through an `OnExit` callback in `MountRequest`. | 2 |
 | 17 | S0 `todo!()` stubs panic in the M1 daemon, because drivers are probed at startup. | Safe-stub rule: stub providers return `Err(Unavailable)`, and stub drivers return `Unavailable` from `probe` and `Err(Unavailable)` from `mount`. | 13 |
@@ -233,12 +233,13 @@ impl RemotePath {
 pub fn tag(s: &str) -> Result<String, Invalid>;       // lowercased; ^[a-z0-9][a-z0-9_.:-]{0,62}$
 pub fn meta_key(s: &str) -> Result<String, Invalid>;  // ^[a-z0-9_.-]{1,64}$
 pub fn native_id(s: &str) -> Result<String, Invalid>; // ^[A-Za-z0-9._:-]{1,128}$
-/// Display-only text: control chars → '?', truncated at `max` chars. Callers pass 512 for errors and log lines (A8).
+/// Display-only text: control chars → '?', truncated at `max` chars. Callers pass 128 for display names,
+/// 256 for metadata values (the config rule) and 512 for errors and log lines (A8).
 pub fn clean(s: &str, max: usize) -> String;
 /// First line of every driver log (§6 spawn): `LOG_HEADER` + the argv.
 pub const LOG_HEADER: &str = "# bifrost exec: ";
 /// Error text from a log or stderr: split on '\n' (trailing '\r' trimmed), skip empty lines and lines starting
-/// with LOG_HEADER, keep the LAST lines that fit in `max` chars, each clean()ed, joined with " | " (A8).
+/// with LOG_HEADER, keep the LAST lines that fit in `max` chars, each clean(line, max)ed, joined with " | " (A8).
 pub fn tail(s: &str, max: usize) -> String;
 pub fn parse_duration(s: &str) -> Result<std::time::Duration, Invalid>; // ^[0-9]+(ms|s|m|h)$, >0, checked overflow
 
@@ -266,7 +267,7 @@ pub fn backoff(failures: u32, initial: Duration, max: Duration, rand: u64) -> Du
 // and tested in S0 (A2), because S1 agents B and C depend on them.
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Metadata { pub tags: BTreeSet<String>, pub values: BTreeMap<String, String> }   // validated / clean()ed
+pub struct Metadata { pub tags: BTreeSet<String>, pub values: BTreeMap<String, String> }   // tags via tag(), keys via meta_key(), values clean(v, 256)
 
 /// Untrusted, pre-validated. user/path are used only with `honor_hints`. There is no driver hint (E2).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -275,7 +276,7 @@ pub struct MountHints { pub user: Option<User>, pub path: Option<RemotePath> }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineObservation {
     pub id: MachineId,
-    pub name: String,                 // display, clean()ed
+    pub name: String,                 // display, clean(name, 128)
     pub native_id: Option<String>,    // tailscale ID / TXT id= / HTTP id — matched only by the OWNING provider's
                                       // include_ids/exclude_ids; global `ids` match the machine id only (A19)
     pub addresses: Vec<Host>,         // ≥1; [0] = connect target
@@ -509,6 +510,7 @@ pub struct StatusDto {                    // GET /v1/status = full snapshot (the
     pub config_path: String, pub config_errors: Vec<String>,   // non-empty ⇒ running on the previous config
     pub mount_root: String, pub ready: bool, pub ssh_agent: bool,
     pub providers: Vec<ProviderDto>, pub drivers: Vec<DriverDto>,
+    pub auto_driver: Option<String>,      // select_driver(&Auto, active auto_order, probes).ok(); what status, doctor and the TUI print (E5)
     pub machines: Vec<MachineDto>, pub mounts: Vec<MountDto>,
     pub conflicts: Vec<String>, pub events: Vec<EventRecord>,   // last 200
 }
@@ -844,16 +846,16 @@ execute side-effect actions (spawn tasks), publish snapshot, persist state.json 
 | 8 | yes | Absent | `mount_retry_at > now` | `Waiting(Backoff(mount_retry_at − now))` |
 | 9 | yes | Absent | — | `Mount{driver}` |
 | 10 | yes | Mounted | H = Stale | `Remount{force: true, Stale}` ⊳U |
-| 11 | yes | Mounted | `handle.fingerprint ≠ cand.spec.fingerprint()` | if `cand.driver.is_ok() && cand.online != Some(false)`: `Remount{force: H = Degraded, SpecChanged}` ⊳U; else `Degraded("change pending: <driver error \| machine offline>")` (A16) |
+| 11 | yes | Mounted | `handle.fingerprint ≠ cand.spec.fingerprint()` ∧ `cand.driver.is_ok()` ∧ `cand.online != Some(false)` (A16) | `Remount{force: H = Degraded, SpecChanged}` ⊳U |
 | 12 | yes | Mounted | H = Degraded ∧ `now − degraded_since ≥ grace` | `Unmount{force: true, OfflineGrace}` ⊳U |
-| 13 | yes | Mounted | H = Degraded | `Degraded(reason)` (sshfs `reconnect` + ServerAlive is handling it) |
+| 13 | yes | Mounted | H = Degraded ∨ `handle.fingerprint ≠ cand.spec.fingerprint()` | `Degraded(reason)`: H's reason when H = Degraded (sshfs `reconnect` + ServerAlive is handling it), else `"change pending: <driver error \| machine offline>"` (A16) |
 | 14 | yes | Mounted | — | `NoOp` (Healthy, Unknown, or offline-but-Healthy: a working mount is never removed) |
 
 Notes on the table:
 - `Remount` is executed exactly like `Unmount`. The new mount comes from row 9 on a later pass, so the offline and backoff gates still apply.
 - Stale cleanup is gated only by `unmount_retry_at`, never by mount backoff.
 - A spec change includes a host change such as a DNS IP move, because the fingerprint covers the host. It remounts gracefully. If the mount is busy, it stays `Degraded("unmount blocked: busy (files open)")` and retries (C4).
-- Row 11 never drops a working mount for a spec it can't mount: while the new spec's driver is unavailable or the machine is offline, the old mount stays and shows `Degraded("change pending: …")` (A16).
+- Row 11 never drops a working mount for a spec it can't mount: while the new spec's driver is unavailable or the machine is offline, row 11 doesn't match and the pass falls through. A hung mount still reaches row 12 after grace, a Degraded one shows its real reason (row 13), and a working one stays and shows `Degraded("change pending: …")` (row 13, A16).
 
 **Runtime transitions** (pure, in `MountRuntime`). A message with the wrong `generation` is ignored. `bo` means `now + backoff(failures, retry_initial, retry_max, rand)`.
 
@@ -890,7 +892,7 @@ Notes on the table:
 2. Every side-effect action calls `begin()` before its task is spawned, so a re-plan during execution hits row 1.
 3. Each side-effect row changes the predicate that selected it: Absent becomes Mounted, a fingerprint mismatch becomes Absent and then a matching fingerprint, Stale becomes Absent.
 4. Failures are rate-limited by `mount_retry_at` / `unmount_retry_at`.
-5. So once the world converges, every id sits in a no-side-effect row (2, 4, 6, 7, 8, the gated `Degraded` branch of 11, 13, 14). Only `now` crossing a deadline, which is an input change, can produce a new action.
+5. So once the world converges, every id sits in a no-side-effect row (2, 4, 6, 7, 8, 13, 14). Only `now` crossing a deadline, which is an input change, can produce a new action.
 6. Tests: `plan_twice_second_all_noop` and `plan_is_deterministic`.
 
 **Triggers.**
@@ -901,12 +903,12 @@ Notes on the table:
 | discovery | one task per network provider: `loop { timeout(30s, discover()) → Msg; select!{ sleep(interval), notify.notified() } }`: discover **first**, so the first result doesn't wait an interval (A7); static observations are replaced on every config apply |
 | health | ticker every `health_interval` → inspect every Mounted runtime with a handle and `!probing` |
 | fallback | ticker every `reconcile_interval` → re-probe drivers, then run a pass |
-| precise deadlines | the actor sleeps until the earliest of `next_wakeup()` and (while `!ready`) `start + grace`. There is no expiry deadline (E3): a pass runs on every provider result and `expires_at ≥ 3 × interval`, so expiry is accurate to one interval |
+| precise deadlines | the actor sleeps until the earliest of `next_wakeup()` and (while `!ready` and once a config file has loaded) `cfg_loaded_at + grace`. There is no expiry deadline (E3): a pass runs on every provider result and `expires_at ≥ 3 × interval`, so expiry is accurate to one interval |
 | child exit | the driver's `on_exit` → `Msg::ChildExited{id, generation}` → immediate inspect |
 | config change | poller / SIGHUP (`reload.rs`) / `POST /v1/config/reload` (`spawn_blocking(load)`) → `Msg::Config`; the actor applies it with the same config-apply path it uses at startup (A4) |
 | API | `Msg::Api(cmd)` with a oneshot reply (`ApiCmd::Discover` has none, E4) |
 
-**Warm-up.** `ready` is false until a config file has actually loaded (A6): with no config file, nothing is ever removed, and the grace period does not apply. Once a config file has loaded, `ready` becomes true when every network provider has returned a **non-empty Ok** at least once (A18), or `offline_grace_period` has passed since start. A static-only config is therefore ready immediately. An `Ok(vec![])` (for example a DNS NXDOMAIN on the index) and an `Err` never count. A provider whose `build_provider` failed never reports, so it waits for the grace period (B11). Once true, `ready` stays true. Before that, only rows 4/5 are blocked, and a held (manual) unmount goes through. Removal decisions that depend on discovery wait for discovery to have actually worked. A provider that is down at login delays removals by at most the grace period.
+**Warm-up.** `ready` is false until a config file has actually loaded (A6): with no config file, no healthy, un-held mount is unmounted (row 3 still clears a Stale or force-requested mount, and a held unmount goes through), and the grace period does not run. Once a config file has loaded, `ready` becomes true when every network provider has returned a **non-empty Ok** at least once (A18), or `offline_grace_period` has passed since the first successful config load (`cfg_loaded_at`: the daemon start when the file exists at startup, else the moment the poller's first file is applied). Measuring from the load, not the start, keeps a late-appearing config from being ready before any provider has reported. A static-only config is therefore ready immediately. An `Ok(vec![])` (for example a DNS NXDOMAIN on the index) and an `Err` never count. A provider whose `build_provider` failed never reports, so it waits for the grace period (B11). Once true, `ready` stays true. Before that, only rows 4/5 are blocked, and a held (manual) unmount goes through. Removal decisions that depend on discovery wait for discovery to have actually worked. A provider that is down at login delays removals by at most the grace period.
 
 **Concurrency model.** One actor task owns all mutable state: `Arc<Config>`, the registry, runtimes, `held`, probe results, the previous verdicts, provider status and the event ring. There are no locks on domain state.
 
@@ -930,7 +932,7 @@ pub enum Tick { Health, Fallback }
 - **Loop:** `select!` over the inbox, `sleep_until(deadline)` and shutdown. It drains `try_recv`, then runs one pass. It publishes `watch::Sender<Arc<StatusDto>>` and pushes events to `broadcast::Sender<EventRecord>` (capacity 256) plus a ring of 200 kept in the snapshot.
 - **Events on transitions (B1):** after each pass the actor compares verdicts and probe results with the previous ones and emits `MachineEligible` when a machine becomes Allowed, and `DriverUnavailable` when a driver goes Available → Unavailable.
 - **The actor never awaits I/O and never touches a mount path.**
-- **Executor tasks** run each driver call under a timeout: mount gets `mount_timeout + 60s` (A9; it covers the 15s preflight, `mount_timeout` and the 10s lazy unmount inside the driver), unmount gets 30s. They report through `Msg`. If the outer timeout drops a mount that was still in progress, the next `mount()` adopts or detaches our own marker entry at step 2 (§6), so the path never stays Refused (A9).
+- **Executor tasks** run each driver call under a timeout: mount gets `mount_timeout + 60s` (A9; it covers the 15s preflight, `mount_timeout` and the 10s lazy unmount inside the driver), unmount gets 30s. They report through `Msg`. If the outer timeout drops a mount that was still in progress, the next `mount()` adopts or detaches our own marker entry (in the A10 fallback, our same-fstype entry) at step 2 (§6), so the path never stays Refused (A9).
 
 **Hung-FUSE guards.**
 1. Mount-table reads (`/proc/self/mountinfo`, `getmntinfo(MNT_NOWAIT)`) never touch FUSE.
@@ -1016,7 +1018,7 @@ This matters because rclone swallows ssh's stderr. **Unverified here:** that ssh
    - the binary resolves; otherwise `Unavailable`.
 2. `table::read()`. If an entry is at `local_path` (A9):
    - our marker (`parse_marker(source)` gives this `id`) with the same fingerprint → `Ok(MountHandle{pid: None})`: a mount left behind by a dropped or timed-out attempt is adopted, with no supervisor;
-   - our marker with a different fingerprint → lazy unmount (`unmount_path(local_path, true)`), then continue;
+   - our marker with a different fingerprint, or (A10 fallback only) an entry whose fstype is this driver's own, whose fingerprint can't be read → lazy unmount (`unmount_path(local_path, true)`), then continue. The fallback entry is never adopted here: a leftover of an older spec would silently serve the wrong host;
    - anything else (foreign) → `Refused("occupied by <fstype> <source>")`.
 3. `prepare_mountpoint`:
    - `symlink_metadata` NotFound → `create_dir` with mode 0700;
@@ -1028,8 +1030,8 @@ This matters because rclone swallows ssh's stderr. **Unverified here:** that ssh
 6. Every 100 ms until `mount_timeout`:
    - the mount table has `local_path` (on Linux also `source == marker(id, fp)`; if S1 finds that sshfs ignores a user `fsname=`, path + fstype instead, A10) → `Ok(MountHandle{pid: child.id()})` and start the supervisor;
    - the child has exited → `Err(Failed(status + tail(last 2 KiB of the log, 512)))` (A8);
-   - the deadline passed → `start_kill()` and `wait()` (this is the only kill, and it hits our own child that never finished mounting), then lazily unmount **only if** the entry at the path carries our marker (A9), then `Err(Failed("timed out after 30s: <tail>"))`.
-   - macOS permission hint (B7): when the log tail matches `kernel extension|System Extension|not permitted`, the error gets the suffix " (macOS: allow the macFUSE system extension in System Settings → Privacy & Security)"; `bifrost doctor` shows the same hint and the README documents it.
+   - the deadline passed → `start_kill()` and `wait()` (this is the only kill, and it hits our own child that never finished mounting), then lazily unmount **only if** the entry at the path carries our marker, or in the A10 fallback has this driver's fstype (A9), then `Err(Failed("timed out after 30s: <tail>"))`.
+   - macOS permission hint (B7): when the log tail matches `kernel extension|System Extension|not permitted`, the error gets the suffix " (macOS: allow the macFUSE system extension in System Settings → Privacy & Security)". This lives in the shared spawn/readiness code in `mount/src/lib.rs` (S1-C), so rclone gets it too; `bifrost doctor` shows the same hint (S2-F) and the README documents it (S4-N).
 
 **sshfs argv.** Options come first and the validated positionals last. Neither positional can start with `-`: the host grammar forbids it and the local path is absolute.
 
@@ -1045,7 +1047,7 @@ This matters because rclone swallows ssh's stderr. **Unverified here:** that ssh
 
 Example: `sshfs -f -o fsname=bifrost:static1@9f1c2e0a7b3d4c55,reconnect,idmap=user,transform_symlinks -o BatchMode=yes,ConnectTimeout=10,ServerAliveInterval=15,ServerAliveCountMax=3,ControlMaster=no,ControlPath=none -o auto_unmount -p 2222 -F /tmp/e2e/ssh_config bf@127.0.0.1:/home/bf /tmp/e2e/machines/static1`.
 
-**Unverified here:** that a user `fsname=` overrides sshfs's own. `strings /usr/bin/sshfs` shows sshfs inserts `-osubtype=sshfs,fsname=%s` at argv[1], so a later user `-o fsname=` should win. S1 agent C verifies it, and E2E p04 asserts `bifrost:static1@` appears in mountinfo. If it doesn't hold (A10): readiness (mount step 6) and `inspect` fall back to path + fstype, and adoption falls back to state.json records, the same path macOS NFS uses.
+**Unverified here:** that a user `fsname=` overrides sshfs's own. `strings /usr/bin/sshfs` shows sshfs inserts `-osubtype=sshfs,fsname=%s` at argv[1], so a later user `-o fsname=` should win. S1 agent C verifies it, and E2E p04 asserts `bifrost:static1@` appears in mountinfo. If it doesn't hold (A10): readiness (mount step 6) and `inspect` fall back to path + fstype, and adoption falls back to state.json records, the same path macOS NFS uses. The same fstype test also marks an entry as ours in mount step 2 (lazy detach, never adopt) and in the step 6 timeout detach, so a dropped or timed-out attempt never leaves the path Refused (A9). `MountRequest` carries no state records, so the driver can't use them there. If S1-C implements this fallback, it adds `// ponytail: a same-fstype entry at <root>/<id> counts as ours and a good leftover costs one extra mount cycle; upgrade: pass state records in MountRequest` at the step 2 check.
 
 **rclone argv.** Always `--flag=value` form.
 
@@ -1112,7 +1114,7 @@ A live, busy mount that is merely not desired is **never** forced. It stays Degr
 **Adoption after a restart:**
 - `adopt()` runs over the mount table and considers only entries **directly under this daemon's canonical root**.
 - Adopted mounts get `MountRuntime::adopted(handle)` with the fingerprint taken from the marker and the pid from the state record with the same `local_path`, else None (B15). A fingerprint that differs from the candidate's goes through row 11 (graceful remount, or Degraded if busy).
-- A non-marker entry at a desired path is foreign. It is never touched, and `mount()` returns Refused, visible as Failed.
+- A non-marker entry at a desired path is foreign (in the A10 fallback, only one whose fstype isn't the driver's own; see mount step 2). It is never touched, and `mount()` returns Refused, visible as Failed.
 - State records whose path is not mounted are dropped. **No pid is ever signalled**: a recorded process may be a lazily-detached sshfs still serving open files. Stuck processes end on their own through ConnectTimeout or ServerAlive.
 
 ---
@@ -1238,7 +1240,7 @@ Algorithm:
     "addresses": ["10.20.0.4"],                      // used only without "host": each Host::parse; invalid ones dropped; ≥1 needed
     "port": 22, "online": true,
     "user": "sami", "path": "/home/sami",            // hints (validated; used only with honor_hints); "driver" is ignored (E2)
-    "metadata": { "tags": ["dev", "agent"], "env": "dev", "rack": 4 }   // tags → tags; scalars → clean()ed strings; nested ignored
+    "metadata": { "tags": ["dev", "agent"], "env": "dev", "rack": 4 }   // tags → tags; scalars → clean(v, 256) strings; nested ignored
 } ] }
 ```
 
@@ -1259,7 +1261,7 @@ Algorithm:
 1. `tracing_subscriber::fmt().with_max_level(level)`; ANSI only when stderr is a TTY.
 2. `state_dir` and `<state>/logs` (B11): created as in **Directories** above (0700 when created).
 3. `File::try_lock(<state>/bifrostd.lock)`. `WouldBlock` → "bifrostd already running", exit 1. The lock is released automatically on a crash. Then the ownership check on `state_dir`.
-4. Config: if the file is missing → `parse("")` (the empty default) plus a warning, and the poller picks up the file later; `ready` stays false until a config file has actually loaded, so adopted mounts are never unmounted meanwhile (A6, test `missing_config_never_unmounts_adopted`). If `load` returns Err → print the sorted errors and exit 2. **An invalid config never starts a daemon that would unmount everything.**
+4. Config: if the file is missing → `parse("")` (the empty default, root `~/machines`) plus a warning, and the poller picks up the file later, but only if its `mount.root` equals that default root; a file with any other root is rejected with "mount.root change requires restart" (A22) and needs a restart. `ready` stays false until a config file has actually loaded, so no healthy, un-held adopted mount is unmounted meanwhile (row 3, a Stale or force-requested mount, still applies; A6, test `missing_config_never_unmounts_adopted`). If `load` returns Err → print the sorted errors and exit 2. **An invalid config never starts a daemon that would unmount everything.**
 5. `root`: created as in **Directories** (0700 when created), then `canonicalize` once. On macOS that resolves `/private` paths.
 6. Read `state.json`. If it doesn't parse, rename it to `state.json.corrupt-<unix>` and start empty. `held` is authoritative (user intent); mount records are only hints.
 7. `adopt(table::read(), root, records)`. Adopted runtimes are inspected at t = 0.
@@ -1269,7 +1271,7 @@ Algorithm:
    - reject paths longer than 103 bytes with a clear message;
    - the lock guarantees any existing socket file is stale, so remove it;
    - `tokio::net::UnixListener::bind`, then `set_permissions(0o600)` on the socket (always).
-10. Spawn the actor, which applies the startup config through the same config-apply path as a reload (A4) and so spawns the provider tasks; then the tickers, `reload::spawn_poller(config_path, tx)` (which also installs the SIGHUP handler, B10) and the signal task (SIGTERM/SIGINT → shutdown). Run `axum::serve(listener, router(state)).with_graceful_shutdown(signal)`, raced against `shutdown + 2s` so open SSE streams can't block exit.
+10. Spawn the actor, which applies the startup config through the same config-apply path as a reload (A4) and so spawns the provider tasks; then the tickers, `reload::spawn_poller(config_path, tx)` (which also installs the SIGHUP handler, A4) and the signal task (SIGTERM/SIGINT → shutdown). Run `axum::serve(listener, router(state)).with_graceful_shutdown(signal)`, raced against `shutdown + 2s` so open SSE streams can't block exit.
 
 **Wiring**, frozen in S0 and never edited by later stages (A3: `Msg`/`Tick` (§5), `Deps` and `spawn` in `actor.rs`; `ApiCmd` and `AppState` in `api.rs`):
 
@@ -1294,7 +1296,9 @@ pub struct Deps {
     pub build_provider: Arc<dyn Fn(&ProviderConfig) -> Result<Arc<dyn DiscoveryProvider>, String> + Send + Sync>,
 }
 /// `cfg_loaded`: false ⇒ `cfg` is the empty default because no config file exists yet; `ready` stays false until a
-/// `Msg::Config` with Ok is applied (A6). `socket` fills `StatusDto.socket` (B11).
+/// `Msg::Config` with Ok is applied (A6). The grace window runs from `cfg_loaded_at`, the first successful config
+/// load (spawn time when `cfg_loaded`, else when that first `Msg::Config` applies), not from spawn. `socket` fills
+/// `StatusDto.socket` (B11).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(cfg: Config, cfg_loaded: bool, root: PathBuf, state_dir: PathBuf, socket: PathBuf,
              held: BTreeSet<MountId>, adopted: Vec<MountHandle>, deps: Deps)
@@ -1362,7 +1366,7 @@ This handles rename-on-save editors, dotfile-manager symlink swaps and NFS or ss
 
 In the actor (`actor.rs`), one config-apply path serves startup and every `Msg::Config` (A4). The whole swap happens in one step:
 - **Invalid config:** keep the old `Arc<Config>`, set `status.config_errors`, emit `ConfigurationReloaded{ok: false, errors}`.
-- **`mount.root` changed:** rejected like an invalid config with the error "mount.root change requires restart"; the old config is kept (A22; the actor does no I/O, so it can't create or canonicalize a new root). Test `reload_root_change_rejected`.
+- **`mount.root` changed:** rejected like an invalid config with the error "mount.root change requires restart"; the old config is kept (A22; the actor does no I/O, so it can't create or canonicalize a new root). The comparison is the new expanded `mount.root` against the active config's. This also covers the missing-config start: the default root `~/machines` is active, so a first file is applied only if its root equals it; otherwise `config_errors` shows the error and `ready` stays false until a restart. Test `reload_root_change_rejected`.
 - **Valid config:**
   - `registry.replace(static_source(), new.static_observations())`;
   - diff providers by name: removed → abort the task and `remove_provider`; added → spawn; changed (`ProviderConfig !=`) → abort and respawn with `task_gen + 1` (observations are kept until they expire); unchanged → keep;
@@ -1434,7 +1438,7 @@ CLI global flags: `--json` (pretty-prints the DTO), `--socket PATH` (env `BIFROS
 | `unmount <target> [--force] [--no-wait]` | yes | POST …/unmount, then poll | `agent-01  unmounted (held; 'bifrost mount agent-01' to resume)` or `agent-01  unmount blocked: busy (files open); retry with --force` (exit 1, C4) |
 | `discover` | yes | POST discover, then poll status until every provider's `refreshes` increases (≤ 30 s) | `PROVIDER KIND STATUS MACHINES LAST-OK` |
 | `reconcile` | yes | POST reconcile | `MOUNT ACTION` |
-| `drivers` | yes; local probe if the daemon is down | GET drivers | `✓ sshfs  /usr/bin/sshfs  SSHFS version 3.7.3, fusermount3` … then `default (auto): sshfs`: the first available driver in `auto_order` from the CLI's own config load (`default_auto_order()` when there is no file), since `DriverDto.auto_rank` is cut (E5) |
+| `drivers` | yes; local probe if the daemon is down | GET status (`drivers`, `auto_driver`) | `✓ sshfs  /usr/bin/sshfs  SSHFS version 3.7.3, fusermount3` … then `default (auto): sshfs` from `StatusDto.auto_driver` (`none` when it is None). With the daemon down: the first available driver of the local probe in `auto_order` from the CLI's own config load (`default_auto_order()` when there is no file). `DriverDto.auto_rank` is cut (E5). `--json` prints `StatusDto.drivers` (`Vec<DriverDto>`), the same shape as `GET /v1/drivers` |
 | `doctor` | no (uses the daemon if it is up) | local + GET status | PRD §24 layout (below) |
 | `config check [PATH]` | **no** | local `load` | `ok: <path> (3 machines, 2 providers, 4 mounts, root /home/sami/machines)`, or sorted `error: <path>: <msg>` lines, exit 1 |
 | `config reload` | yes | POST config/reload | `reloaded`, or the error lines, exit 1 |
@@ -1466,7 +1470,9 @@ Selected default
   sshfs
 ```
 
-When a mount's `last_error` carries the macOS permission hint (§6 mount step 6, B7), `doctor` repeats it under Mount Drivers.
+The `(default)` mark in `status` and doctor's "Selected default" both come from `StatusDto.auto_driver`, the daemon's own `select_driver(&Auto, …)` over its active config (E5). When the daemon is down, doctor uses the same local derivation as `drivers`.
+
+When a mount's `last_error` carries the macOS permission hint (§6 mount step 6, B7), `doctor` repeats it under Mount Drivers (S2-F).
 
 **Exit codes:** 0 ok · 1 operation failed (API error, mount ended Failed or Offline, unmount busy, invalid config, doctor found a ✗ in Config or Drivers) · 2 usage (clap) · 3 daemon not reachable.
 
@@ -1493,7 +1499,7 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
 2. Machines: `● agent-01  tailscale  mounted  sshfs`.
 3. Mounts.
 4. Discovery.
-5. Drivers.
+5. Drivers: one row per `DriverDto`, with the default marked from `StatusDto.auto_driver` (E5).
 6. Events.
 7. Logs.
 
@@ -1541,9 +1547,9 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
 | 4 | Never weaken host verification | The constant `SSH_OPTS` has no host-key options. No config knob exists. rclone's internal SFTP library is never used. Test `argv_never_weakens_host_keys`. E2E `psec_hostkey.sh` checks an unknown key fails with "Host key verification failed". |
 | 5 | Mount only explicit paths | Remote paths come from static config or the provider template. Hints are used only with `honor_hints`, and only after `RemotePath::parse` (no `..`, `:` or control characters). There is no driver hint (E2). |
 | 6 | Never execute discovery-supplied commands | Discovery data can only become `Name`, `Host`, `User`, `RemotePath` or `u16`. argv is built from constants plus those, via `Command::args`, never `sh -c`. Positionals can't start with `-`. `--flag=value` for rclone. `--sftp-ssh` tokens are checked for whitespace and quotes. `--sftp-shell-type=none` and `--sftp-disable-hashcheck`. The dangerous sshfs options (`ssh_command`, `directport`, `passive`) are never emitted. |
-| 7 | TXT/HTTP are untrusted | `parse_bf1`: 2 KiB, `v=bf1` first, a duplicate key invalidates the record, labels have no dots, ≤256 nodes, whole-node rejection, identity pinned to the label. HTTP: 1 MiB, 1000 entries, per-entry isolation, no redirects, credentials only over https or loopback, no CR/LF in headers. `clean()` on every displayed string (no terminal-escape injection). E2E hostile records plus a canary file. |
+| 7 | TXT/HTTP are untrusted | `parse_bf1`: 2 KiB, `v=bf1` first, a duplicate key invalidates the record, labels have no dots, ≤256 nodes, whole-node rejection, identity pinned to the label. HTTP: 1 MiB, 1000 entries, per-entry isolation, no redirects, credentials only over https or loopback, no CR/LF in headers. `clean(s, max)` on every displayed string: 128 for names, 256 for metadata values, 512 for errors and log lines (no terminal-escape injection, A8). E2E hostile records plus a canary file. |
 | 8 | Local path traversal / collisions | `Name::parse` gives a single lowercase component. `local_path = root.join(id)` only in `desired`. Config enforces unique locals; at runtime static wins and the conflict is reported. `prepare_mountpoint` refuses symlinks, non-directories, non-empty directories and occupied paths. The root is canonicalized once and can't be `/` or `$HOME`. |
-| + | Local API | The socket is always 0600. Directories the daemon creates are 0700; pre-existing directories are never chmodded (A21) but must have the daemon's owner uid (ownership check, §8). A lock file prevents a second daemon. The default socket path is never under `/tmp` (C5). |
+| + | Local API | The socket is always 0600. Directories the daemon creates are 0700; pre-existing directories are never chmodded (A21), and pre-existing state and socket directories must have the daemon's owner uid (ownership check, §8 Directories; the mount root is not checked). A lock file prevents a second daemon. The default socket path is never under `/tmp` (C5). |
 
 ---
 
@@ -1570,7 +1576,7 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
 - **core::reconcile:**
   - **`prd_fake_discovery_fake_driver`**: `FakeDiscovery` returns A + B, the policy has `include_names=["*"]` for `fake`, and `FakeDriver` has A mounted with a matching fingerprint and B absent. `plan` gives `[(a, NoOp), (b, Mount)]`.
   - **`plan_twice_second_all_noop`**: execute plan₁ through `FakeDriver` (`block_on`), set runtimes from `inspect`, then plan₂ is all NoOp. Also `plan_is_deterministic`.
-  - One test per table row: `row01_inflight_waits`, `row02_absent_not_desired_noop`, `row03_stale_not_desired_force`, `row04_warmup_blocks_removal`, `row04_held_bypasses_warmup`, `row05_not_desired_graceful`, `row06_no_driver_waits`, `row07_offline_waits`, `row08_backoff_waits`, `row09_mount`, `row10_stale_remount_force`, `row11_spec_change_remount_graceful`, `row11_degraded_spec_change_lazy`, `row11_gated_on_driver_and_online` (A16), `row12_grace_elapsed_lazy_unmount`, `row13_degraded_within_grace`, `row14_offline_but_healthy_noop`, and `gate_u_unmount_backoff`.
+  - One test per table row: `row01_inflight_waits`, `row02_absent_not_desired_noop`, `row03_stale_not_desired_force`, `row04_warmup_blocks_removal`, `row04_held_bypasses_warmup`, `row05_not_desired_graceful`, `row06_no_driver_waits`, `row07_offline_waits`, `row08_backoff_waits`, `row09_mount`, `row10_stale_remount_force`, `row11_spec_change_remount_graceful`, `row11_degraded_spec_change_lazy`, `row11_gated_on_driver_and_online` (A16: with the gate closed, a Healthy mount gives row 13 `Degraded("change pending: …")`, and one Degraded past grace still gives row 12), `row12_grace_elapsed_lazy_unmount`, `row13_degraded_within_grace`, `row14_offline_but_healthy_noop`, and `gate_u_unmount_backoff`.
   - Rows 3 and 5 use `why = Manual` for a held candidate, else `NotDesired` (A14); `row03_*`/`row05_*` assert both.
   - Also: `stale_cleanup_not_gated_by_mount_backoff`, `missing_goes_absent_with_backoff`, `stale_generation_ignored_for_health_and_exit` (A1), `failures_reset_only_after_stable_healthy` (A15), `grace_unmount_sets_offline`, `auto_driver_sticky_fingerprint`, `select_driver_auto_order_and_named_unavailable`, `hints_ignored_unless_honor_hints`, `static_local_collision_conflict`, `next_wakeup_is_earliest_deadline`, `availability_tables` (mount and machine; a desired mount with a driver error is Failed with detail, a machine with no mounts is Eligible, B15), `offline_chain_mounted_degraded_offline`.
 - **config:**
@@ -1593,12 +1599,12 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
   - HTTP: `inventory_prd_example`, `invalid_entries_isolated`, `name_falls_back_to_id`, `metadata_tags_merged_scalars_flattened`, and against a 15-line tokio TCP responder on 127.0.0.1:0: `body_cap_enforced`, `auth_header_sent_non2xx_failed`, `redirect_not_followed`.
 - **client + API** (S1-D): `uds_roundtrip` (an axum dev-dependency server on a temp socket), `not_running_enoent_and_econnrefused`, `api_error_maps_status_and_body`; in `daemon/src/api.rs`: `sse_frame_format`, `log_route_rejects_traversal`.
 - **daemon** (S2-E; in-process: `Deps` whose `drivers` closure returns `FakeDriver`s and whose `build_provider` returns `FakeDiscovery`, A5; temp state directory and socket):
-  - startup and mounting: `mounts_desired_on_startup_and_idempotent`, `warmup_protects_adopted_until_ok`, **`missing_config_never_unmounts_adopted`** (A6);
+  - startup and mounting: `mounts_desired_on_startup_and_idempotent`, `warmup_protects_adopted_until_ok`, **`missing_config_never_unmounts_adopted`** (A6: a healthy, un-held adopted mount stays while no config file exists; the grace clock starts only when a file loads);
   - child exits (via `FakeDriver::exit`, B12): `child_exit_triggers_probe_and_remount`, `exit_during_unmount_ignored`;
   - API: `api_mount_forbidden_for_discover_only`, `api_unmount_holds_across_restart`, `api_unmount_busy_stays_degraded` (via `FakeDriver.busy`, B12), **`reconcile_endpoint_twice_second_all_noop`** (A11);
   - socket, directories and lock: `socket_0600_stale_replaced`, **`preexisting_parent_dirs_not_chmodded`** (A21), `second_instance_lock_refused`;
   - state file: `state_json_atomic_corrupt_quarantined`;
-  - reload: `reload_invalid_keeps_old`, `reload_root_change_rejected` (A22), `reload_changed_provider_respawns_keeps_observations`, `stale_task_gen_dropped`;
+  - reload: `reload_invalid_keeps_old`, `reload_root_change_rejected` (A22; also a first file with a non-default root after a missing-config start), `reload_changed_provider_respawns_keeps_observations`, `stale_task_gen_dropped`;
   - events: `events_eligible_and_driver_unavailable_on_transition` (B1).
 - **cli:** `machines_table_golden`, `mounts_table_golden`, `status_block_golden`, `exit3_when_daemon_absent` (runs the binary against a bogus socket), `config_check_output_deterministic`.
 - **tui:** `renders_machines_with_glyphs_and_teal`, `key_m_emits_mount_for_selection`, `U_asks_confirmation`, `filter_narrows_rows`, `unreachable_banner`, `no_color_disables_styles`.
@@ -1607,7 +1613,7 @@ When a mount's `last_error` carries the macOS permission hint (§6 mount step 6,
 
 - Each phase file `pNN_*.sh` defines up to three functions: `setup_<p>` (fixtures), `config_<p>` (prints a TOML fragment) and `check_<p>` (assertions).
 - `run.sh` sources `lib.sh` and the phase files **listed explicitly** for the chosen mode (no glob, so collation can't reorder `p13_hardening` and `p13a_adopt`; C7), then calls every `setup_*`, concatenates the `config_*` output after `config.tmpl.toml`, starts the daemon, and calls every `check_*` in list order.
-- **Adding a phase edits only its own file plus one entry in `run.sh`'s list.** The m1 list is `p04 p05 p06 psec p13a`; `all` appends `p07 p08 p09 p10 p12 p13`.
+- **S2-G writes both complete lists into `run.sh`**: m1 is `p04_sshfs p05_api p06_recovery psec_hostkey p13a_adopt`; `all` appends `p07_tailscale p08_dns p09_rclone p10_http p12_reload p13_hardening`. A listed phase file that doesn't exist yet is skipped with a `skip: <file> (not present)` line, so S3's `run.sh all` runs p04–p10 before S4 adds p12/p13. **Adding a phase edits only its own file**; no S3/S4 agent touches `run.sh` (owned by S2-G, C7). `// ponytail: a missing listed file is skipped, not an error; the final gate's run.sh all must print no skip lines.`
 - Only `p08` defines `[policy.*]` (B5); a second `[policy.deny]` fragment would collide in the concatenated TOML.
 
 ```bash
@@ -1668,9 +1674,9 @@ This section mirrors the approved plan's S0–S4 task ownership exactly. Every a
 | stage | PRD phases | agents → files owned | implements / tests first | gate |
 |---|---|---|---|---|
 | **S0** (serial) | 0 | **S0.1 spec:** `git init`, initial commit of the PRD and `brand/`; `docs/design/{contract.md,critique.md}` with every amendment applied. **S0.2 verifier:** every amendment ID checked against `contract.md`; zero misses. **S0.3 skeleton:** `.gitignore` (`target/`), `Cargo.toml`, `crates/*/Cargo.toml` per §1 (with P1: no `rustfmt.toml`; P2), `cargo generate-lockfile` (needs network), every public signature of §2, §3, §5 (`Msg`/`Tick`), §6, §7, §8 (`ApiCmd`, `Deps`, `AppState`) and §9 as amended, as safe stubs. **S0.4** `core/validate.rs` fully implemented. **S0.5** `core/model.rs` helpers (A2). **S0.6** `core/fake.rs` complete (with B12); `bifrost-daemon/src/main.rs` wiring final. **S0.7** `scripts/check.sh`, the release profile, `rustup target add aarch64-apple-darwin` | S0.4: the §12 core::validate list (incl. `remote_path_rules` with `"/"`, `tail_skips_header`, `backoff_bounds` from 0). S0.5: the §12 core::model list | `cargo build --workspace --all-targets`; `scripts/check.sh` green; `cargo check --target aarch64-apple-darwin -p bifrost-core -p bifrost-config -p bifrost-mount -p bifrost-client -p bifrost-cli -p bifrost-tui` green; commit `chore: workspace skeleton + frozen contract`; `Cargo.toml` and `Cargo.lock` frozen |
-| **S1** (4 parallel) | 1, 2, 4 | **A** core: `core/src/{model,policy,registry,reconcile,events,api}.rs` bodies. **B** config: `bifrost-config/src/*`; `config check` in `bifrost-cli/src/main.rs`. **C** mount + sshfs: `bifrost-mount/src/{lib,table,check,sshfs}.rs`; `tests/e2e/{lib.sh,sshd/Dockerfile}`. **D** client + API: `bifrost-client/src/lib.rs`; `bifrost-daemon/src/api.rs` | **A:** §2, §4, §5 with A6/A14–A16/A18/A19/B8/B15/C2/C4; policy suite incl. `global_ids_match_machine_id_only`, `native_id_scoped_to_owning_provider`; registry suite; `prd_fake_discovery_fake_driver`, `plan_twice_second_all_noop`, `plan_is_deterministic`, `row01…row14`, `gate_u_unmount_backoff`, `failures_reset_only_after_stable_healthy`, `row11_gated_on_driver_and_online`, `availability_tables`, `offline_chain_mounted_degraded_offline`. **B:** §3 with B2/B8 (trust ranks, `DRIVER_NAMES`, `default_auto_order`); `parses_full_example`, `parses_prd_s6_s7_s13_s31_snippets`, `shorthand_equals_mounts_form`, `empty_text_is_default_config`, `errors_sorted_deterministic`, `unknown_field_has_line_col` and the rest of the §12 config list. **C:** §6 (Linux + macOS sshfs argv, getmntinfo) with A9/A10/A13/A17/B14/B15; `mountinfo_*`, `sshfs_argv_{linux,macfuse,fuset}_golden`, `argv_never_weakens_host_keys`, `positionals_never_start_with_dash`, `adopt_marker_record_foreign_outside_root`, `prepare_mountpoint_*`, `timed_guard_single_thread`, `probe_fake_sshfs_in_path` (via `which_in`), `mount_step2_own_marker_adopt_or_detach_foreign_refused`; `#[ignore]` docker `sshfs_mount_inspect_unmount`, `sshfs_kill9_auto_unmount_missing`, `preflight_exit0_and_hostkey_failure`; **records** whether the preflight exits 0 and whether the `fsname` override works. **D:** §8 routes (minus E1), §9 client, C6; `uds_roundtrip`, `not_running_enoent_and_econnrefused`, `api_error_maps_status_and_body`, `sse_frame_format`, `log_route_rejects_traversal` (router over a fixture snapshot with a stub actor task) | `scripts/check.sh` green; `cargo test -p bifrost-mount -- --ignored` mounts, reads, kills and unmounts against the docker sshd; `bifrost config check` byte-identical twice on the §3/§13/§31 examples; commit |
-| **S2 = M1** (3 parallel) | 3, 5, 6 | **E** daemon: `bifrost-daemon/src/{actor,state,main}.rs`. **F** CLI: `bifrost-cli/src/{main,output,doctor}.rs`. **G** E2E m1: `tests/e2e/{run.sh,config.tmpl.toml,p04_sshfs.sh,p05_api.sh,p06_recovery.sh,psec_hostkey.sh,p13a_adopt.sh}` | **E:** §5 actor, executor, health, provider runner, warm-up; §8 startup, socket, lock, state.json, adoption, signals, shutdown; config apply + provider diffing (A4); A6, A7, A9 outer timeout, A11, A21, A22, B1, B11; the §12 daemon list. **F:** §9, every PRD §18 command, exit codes 0/1/2/3, `--json`, doctor per PRD §24, C6; `machines_table_golden`, `mounts_table_golden`, `status_block_golden`, `exit3_when_daemon_absent`, `config_check_output_deterministic`. **G:** the §12 harness with B4, B6, A11, A12, A13, C7 (the harness is the test) | **M1 gate:** `tests/e2e/run.sh m1` green: P4 mount, `ls`, unmount, held, remount (the §31 shorthand shape under `$T`, B4); P5 API, socket mode 600, second instance refused, exit 3, SSE frame; P6 `kill -TERM` and `kill -KILL` recovery, idempotent reconcile, degraded → restored, offline → restored; the host-key negative; kill -9 adoption with no duplicate process. `scripts/check.sh` green; commit `feat: milestone 1` |
-| **S3** (5 parallel) | 7, 8, 9, 10, 11 | **H** `discovery/src/tailscale.rs`, `tests/fixtures/tailscale_status.json`, `tests/e2e/p07_tailscale.sh`. **I** `discovery/src/dns.rs` (+ `dns_label`), `tests/e2e/dns/*`, `p08_dns.sh`. **J** `mount/src/rclone.rs`, `p09_rclone.sh`. **K** `discovery/src/http.rs`, `tests/e2e/inventory.py`, `p10_http.sh`. **L** `bifrost-tui/src/{main,app,ui}.rs`. The daemon is not touched | **H:** §7 Tailscale (E5: no `tailscale_id`); `tailscale_fixture_parse`, `tailscale_backend_stopped_unavailable`, `tailscale_new_peer_appears`, `#[ignore] tailscale_live_status`; p07 opt-in, discovery only, zero mounts of real peers. **I:** §7 bf1 with B5, C8, D1, E2; `bf1_*`, `node_default_host`, `node_id_pinned_to_label`, `ambiguous_node_skipped`, `ttl_min_of_index_and_node`, `#[ignore] coredns_discovery`; p08 with hostile records, canary file and global deny. **J:** §6 rclone (Linux mount; macOS mount/nfsmount argv; probes) with A12, A23, B7, B13; `rclone_argv_mount_golden`, `rclone_argv_nfsmount_forces_writes`, `rclone_sftp_ssh_tokens_clean_cfg_quoted`, `rclone_never_uses_internal_ssh`, `rclone_nfs_unavailable_on_linux`, extended `argv_never_weakens_host_keys`; `#[ignore] rclone_mount_write_roundtrip`, `rclone_kill9_stale_then_lazy`; p09 + the rclone host-key negative. **K:** §7 HTTP with A20, E2; `inventory_prd_example`, `invalid_entries_isolated`, `name_falls_back_to_id`, `metadata_tags_merged_scalars_flattened`, `body_cap_enforced`, `auth_header_sent_non2xx_failed`, `redirect_not_followed`; p10. **L:** §10 with C1, E6; brand palette; wordmark + tagline "Remote worlds. Local files."; the §12 tui list | `tests/e2e/run.sh all` passes p04–p10; `E2E_TAILSCALE=1 tests/e2e/run.sh all` passes p07 against the live tailnet, discovery only; the darwin check stays green; a manual TUI session against the E2E daemon covers mount, unmount, force, reconcile, discover, reload, details, logs, filter; commit |
+| **S1** (4 parallel) | 1, 2, 4 | **A** core: `core/src/{model,policy,registry,reconcile,events,api}.rs` bodies. **B** config: `bifrost-config/src/*`; `config check` in `bifrost-cli/src/main.rs`. **C** mount + sshfs: `bifrost-mount/src/{lib,table,check,sshfs}.rs`; `tests/e2e/{lib.sh,sshd/Dockerfile}`. **D** client + API: `bifrost-client/src/lib.rs`; `bifrost-daemon/src/api.rs` | **A:** §2, §4, §5 with A6/A14–A16/A18/A19/B8/B15/C2/C4; policy suite incl. `global_ids_match_machine_id_only`, `native_id_scoped_to_owning_provider`; registry suite; `prd_fake_discovery_fake_driver`, `plan_twice_second_all_noop`, `plan_is_deterministic`, `row01…row14`, `gate_u_unmount_backoff`, `failures_reset_only_after_stable_healthy`, `row11_gated_on_driver_and_online`, `availability_tables`, `offline_chain_mounted_degraded_offline`. **B:** §3 with B2/B8 (trust ranks, `DRIVER_NAMES`, `default_auto_order`); `parses_full_example`, `parses_prd_s6_s7_s13_s31_snippets`, `shorthand_equals_mounts_form`, `empty_text_is_default_config`, `errors_sorted_deterministic`, `unknown_field_has_line_col` and the rest of the §12 config list. **C:** §6 (Linux + macOS sshfs argv, getmntinfo) with A9/A10/A13/A17/B7 (the `last_error` hint in the shared lib.rs spawn code)/B14/B15; `mountinfo_*`, `sshfs_argv_{linux,macfuse,fuset}_golden`, `argv_never_weakens_host_keys`, `positionals_never_start_with_dash`, `adopt_marker_record_foreign_outside_root`, `prepare_mountpoint_*`, `timed_guard_single_thread`, `probe_fake_sshfs_in_path` (via `which_in`), `mount_step2_own_marker_adopt_or_detach_foreign_refused`; `#[ignore]` docker `sshfs_mount_inspect_unmount`, `sshfs_kill9_auto_unmount_missing`, `preflight_exit0_and_hostkey_failure`; **records** whether the preflight exits 0 and whether the `fsname` override works. **D:** §8 routes (minus E1), §9 client, C6; `uds_roundtrip`, `not_running_enoent_and_econnrefused`, `api_error_maps_status_and_body`, `sse_frame_format`, `log_route_rejects_traversal` (router over a fixture snapshot with a stub actor task) | `scripts/check.sh` green; `cargo test -p bifrost-mount -- --ignored` mounts, reads, kills and unmounts against the docker sshd; `bifrost config check` byte-identical twice on the §3/§13/§31 examples; commit |
+| **S2 = M1** (3 parallel) | 3, 5, 6 | **E** daemon: `bifrost-daemon/src/{actor,state,main}.rs`. **F** CLI: `bifrost-cli/src/{main,output,doctor}.rs`. **G** E2E m1: `tests/e2e/{run.sh,config.tmpl.toml,p04_sshfs.sh,p05_api.sh,p06_recovery.sh,psec_hostkey.sh,p13a_adopt.sh}` | **E:** §5 actor, executor, health, provider runner, warm-up; §8 startup, socket, lock, state.json, adoption, signals, shutdown; config apply + provider diffing (A4); A6, A7, A9 outer timeout, A11, A21, A22, B1, B11; the §12 daemon list. **F:** §9, every PRD §18 command, exit codes 0/1/2/3, `--json`, doctor per PRD §24 (with the B7 hint and `StatusDto.auto_driver`, E5), C6; `machines_table_golden`, `mounts_table_golden`, `status_block_golden`, `exit3_when_daemon_absent`, `config_check_output_deterministic`. **G:** the §12 harness with B4, B6, A11, A12, A13, C7 (both complete `run.sh` lists; missing phase files skipped) (the harness is the test) | **M1 gate:** `tests/e2e/run.sh m1` green: P4 mount, `ls`, unmount, held, remount (the §31 shorthand shape under `$T`, B4); P5 API, socket mode 600, second instance refused, exit 3, SSE frame; P6 `kill -TERM` and `kill -KILL` recovery, idempotent reconcile, degraded → restored, offline → restored; the host-key negative; kill -9 adoption with no duplicate process. `scripts/check.sh` green; commit `feat: milestone 1` |
+| **S3** (5 parallel) | 7, 8, 9, 10, 11 | **H** `discovery/src/tailscale.rs`, `tests/fixtures/tailscale_status.json`, `tests/e2e/p07_tailscale.sh`. **I** `discovery/src/dns.rs` (+ `dns_label`), `tests/e2e/dns/*`, `p08_dns.sh`. **J** `mount/src/rclone.rs`, `p09_rclone.sh`. **K** `discovery/src/http.rs`, `tests/e2e/inventory.py`, `p10_http.sh`. **L** `bifrost-tui/src/{main,app,ui}.rs`. The daemon is not touched | **H:** §7 Tailscale (E5: no `tailscale_id`); `tailscale_fixture_parse`, `tailscale_backend_stopped_unavailable`, `tailscale_new_peer_appears`, `#[ignore] tailscale_live_status`; p07 opt-in, discovery only, zero mounts of real peers. **I:** §7 bf1 with B5, C8, D1, E2; `bf1_*`, `node_default_host`, `node_id_pinned_to_label`, `ambiguous_node_skipped`, `ttl_min_of_index_and_node`, `#[ignore] coredns_discovery`; p08 with hostile records, canary file and global deny. **J:** §6 rclone (Linux mount; macOS mount/nfsmount argv; probes) with A12, A23, B13 (B7 comes through the shared spawn code, S1-C); `rclone_argv_mount_golden`, `rclone_argv_nfsmount_forces_writes`, `rclone_sftp_ssh_tokens_clean_cfg_quoted`, `rclone_never_uses_internal_ssh`, `rclone_nfs_unavailable_on_linux`, extended `argv_never_weakens_host_keys`; `#[ignore] rclone_mount_write_roundtrip`, `rclone_kill9_stale_then_lazy`; p09 + the rclone host-key negative. **K:** §7 HTTP with A20, E2; `inventory_prd_example`, `invalid_entries_isolated`, `name_falls_back_to_id`, `metadata_tags_merged_scalars_flattened`, `body_cap_enforced`, `auth_header_sent_non2xx_failed`, `redirect_not_followed`; p10. **L:** §10 with C1, E6; brand palette; wordmark + tagline "Remote worlds. Local files."; the §12 tui list | `tests/e2e/run.sh all` passes p04–p10; `E2E_TAILSCALE=1 tests/e2e/run.sh all` passes p07 against the live tailnet, discovery only; the darwin check stays green; a manual TUI session against the E2E daemon covers mount, unmount, force, reconcile, discover, reload, details, logs, filter; commit |
 | **S4** (2 parallel + final review) | 12, 13 | **M** `bifrost-daemon/src/reload.rs`, `p12_reload.sh`. **N** `p13_hardening.sh`, `README.md`, the macOS cfg audit, the `ponytail:` comment audit | **M:** `spawn_poller` on a `std::thread`: 2s poll, a two-read debounce, SIGHUP; B10. **N:** p13 checks IP change, duplicate discovery and rename. README covers the hero `brand/05_hero/hero_aurora_bridge_16x9.png` and logo; quickstart with the §31 config; the policy model; systemd `KillMode=process`, `SSH_AUTH_SOCK` import, `ssh-keyscan` hint; macOS permissions (B7). **Final whole-repo review**, looping until 2 consecutive dry rounds or at most 3 rounds: five finder lenses (PRD §35 DoD conformance, §23 security, reconciler/concurrency correctness, data loss and error handling, ponytail over-engineering), a 3-vote adversarial verify (a finding survives with ≥2 confirmations), a fixer, then `check.sh` and `run.sh all` | `tests/e2e/run.sh all` green **twice in a row**; `scripts/check.sh` green; the darwin check green; every §15 item has its `ponytail:` comment; commit `feat: bifrost v1` |
 
 Per-task pipeline inside S1–S4: implementer in a worktree (TDD: the named tests first) → two reviewers (contract/amendment conformance + correctness; trust boundary + ponytail) → skeptic → fixer; then one merge agent merges branch by branch, running `scripts/check.sh` after each.
@@ -1683,7 +1689,7 @@ Per-task pipeline inside S1–S4: implementer in a worktree (TDD: the named test
 |---|---|---|
 | 1 | A hung FUSE mount freezes the daemon | The actor does no I/O. Mount-table reads never touch FUSE. There is exactly one timed probe per path, with an in-flight guard. Every command has a timeout. After the grace period, a lazy detach frees the path without killing anything. |
 | 2 | Data loss on unmount or remount | Graceful by default. Busy leads to backoff and Degraded, never automatic force. Force means lazy detach with **no kill**, so open files keep working. Mounting over a non-empty directory is refused. `remove_dir` only removes empty directories. state.json writes are atomic. |
-| 3 | The startup race unmounts good adopted mounts | Warm-up requires a loaded config file (A6) and one **non-empty** Ok from every network provider, or the grace period (A18). An invalid config exits instead of running empty. A missing config runs the empty default with `ready = false`, so mounts adopted from the mount table are never unmounted until a config file loads (test `missing_config_never_unmounts_adopted`). |
+| 3 | The startup race unmounts good adopted mounts | Warm-up requires a loaded config file (A6) and one **non-empty** Ok from every network provider, or the grace period measured from that first config load (A18). An invalid config exits instead of running empty. A missing config runs the empty default with `ready = false`, so no healthy, un-held mount adopted from the mount table is unmounted until a config file loads (test `missing_config_never_unmounts_adopted`). |
 | 4 | Daemon death kills or corrupts children | `process_group(0)`, no `kill_on_drop`, and log output goes to a file rather than a pipe (no SIGPIPE). Adoption uses the fingerprint marker from the kernel mount table and is scoped to this daemon's root. No pid is ever signalled. |
 | 5 | Remount storms | The fingerprint covers the selector text, so `auto` is sticky. Offline-but-Healthy is NoOp. Absent observations age out after `3 × interval`. A failing provider freezes. `failures` resets only on a Healthy probe once the mount has been up for `retry_max` (A15). Events fire on transitions only. |
 | 6 | Fighting sshfs's own `reconnect` | Degraded or Unresponsive is left to `reconnect` and ServerAlive until the grace period. Bifröst acts immediately only on Stale (a dead process or ENOTCONN) or a spec change. |
@@ -1729,7 +1735,7 @@ Each item becomes a `// ponytail: <ceiling>; <upgrade>` comment at the named loc
 | 24 | TUI uses truecolor only | Terminal.app renders the RGB colours approximately | map to 256-colour indices when `COLORTERM` isn't truecolor | tui/ui.rs |
 | 25 | macOS code is compile-checked only | runtime behaviour of macFUSE, FUSE-T and nfsmount is unproven | a macOS runner for the E2E | mount/* |
 | 26 | Discovery intervals have no jitter; one `failures` counter covers both mount and unmount | synchronised provider polls | ±10% jitter | daemon/actor.rs |
-| 27 | Missing config means the empty default config | a typo in `BIFROST_CONFIG` silently runs with no machines (logged at warn) | an opt-in `--require-config` | daemon/main.rs |
+| 27 | Missing config means the empty default config (root `~/machines`) | a typo in `BIFROST_CONFIG` silently runs with no machines (logged at warn); a file that appears later with a non-default `mount.root` is rejected (A22) and needs a restart | an opt-in `--require-config` | daemon/main.rs |
 | 28 | A discovered machine's default template is `remote = "~"` (the remote login directory), not PRD §2's `~/machines/agent-01/home/sami/project` shape (B2) | discovered machines mount their home unless the provider template sets `remote` | a per-provider default in docs or a smarter template | bifrost-config/src/lib.rs |
 | 29 | No CI yaml until a git remote exists; `scripts/check.sh` is the gate (PRD §29 P0 CI, B3) | checks run only when an agent or a human runs them | add a CI workflow calling `scripts/check.sh` once a remote exists | scripts/check.sh |
 | 30 | A provider that fails permanently freezes its last view forever (B9) | machines it reported stay listed, and mounted, until it recovers or is removed from config | expire frozen observations after a long cap (e.g. `offline_grace_period`) | core/registry.rs |
@@ -1744,7 +1750,7 @@ Each item becomes a `// ponytail: <ceiling>; <upgrade>` comment at the named loc
 
 ## Amendments (applied)
 
-The critique triage from the approved plan, copied verbatim. IDs refer to `docs/design/critique.md` (A = defects, B = missing homes, C = inconsistencies, D = API claims, E = ponytail cuts; P = orchestrator additions). Every row is applied in place in the sections above; where any text still conflicts, the amendment wins.
+The critique triage from the approved plan, copied verbatim. IDs refer to `docs/design/critique.md` (A = defects, B = missing homes, C = inconsistencies, D = API claims, E = ponytail cuts; P = orchestrator additions). Every row is applied in place in the sections above; where any text still conflicts, the amendment wins, as refined by the list after the table.
 
 | ID | Change (short) | Owner |
 |---|---|---|
@@ -1803,3 +1809,17 @@ The critique triage from the approved plan, copied verbatim. IDs refer to `docs/
 | E6 | The TUI polls inline: `rt.block_on(timeout(500ms, get("/v1/status")))` once per second, with no poller task or channel | S3-L |
 | P1 | No `rustfmt.toml`; rustfmt defaults | S0 |
 | P2 | All agents share `CARGO_TARGET_DIR=/home/samimishal/projects/rust/bifrost-target`. With 4 CPUs and about 2 GB free RAM, compiling the dependencies once beats per-worktree builds; the workflow cap is 2 concurrent agents anyway. This replaces contract §1 rule 3 | all |
+
+### Refinements (S0.2 verifier, round 1)
+
+These refine the rows above. Where a verbatim row's wording differs, this list and the body text win over that row.
+
+- **A18 / A6:** "`offline_grace_period` since start" means since the first successful config load (`cfg_loaded_at`). That is the daemon start whenever a config file exists at startup (§5 Warm-up, §8 `spawn`).
+- **A22 / A6:** A22 also covers the missing-config start. The default root `~/machines` is active, so a later file is applied only if its `mount.root` equals that root; otherwise a restart is needed (§8 Startup step 4, §15 #27).
+- **A6:** "nothing is unmounted" means no healthy, un-held mount. Row 3 (Stale or force-requested) and a held unmount still go through.
+- **A16:** The row 11 gate falls through instead of returning. Row 12 still detaches a hung mount after grace, and row 13 shows `"change pending: …"` for a working mount (§5 table).
+- **A9 / A10:** In the A10 fallback, an entry with the driver's own fstype at `local_path` counts as ours for mount step 2 (lazy detach, never adopt) and for the timeout detach (§6).
+- **B7:** The hint code is owned by S1-C (shared `mount/src/lib.rs` spawn and readiness code), S2-F (doctor) and S4-N (README). S3-J inherits it and owns no B7 code.
+- **E5:** `StatusDto.auto_driver` (the daemon's `select_driver(&Auto, …)`) is the one source for the default shown by status, doctor, `drivers` and the TUI. The per-driver `auto_rank` stays cut.
+- **C7:** S2-G writes both complete `run.sh` lists; a listed phase file that doesn't exist yet is skipped. S3 and S4 agents never edit `run.sh`.
+- **A8:** `clean` caps are 128 for names, 256 for metadata values and 512 for errors and log lines.
