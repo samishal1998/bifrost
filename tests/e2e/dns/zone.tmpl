@@ -1,0 +1,13 @@
+; p08 zone (contract §12), rendered by p08_zone in tests/e2e/p08_dns.sh:
+; @SERIAL@ = SOA serial (coredns reloads on a bump), @TAGS@ = " tags=dev" or "", @T@ = the run's $T.
+; bad-node and evil are hostile: an ssh option as the host, a path-traversal id. Both must be skipped.
+$ORIGIN test.bifrost.
+$TTL 5
+@                  IN SOA ns admin @SERIAL@ 60 60 3600 5
+@                  IN NS  ns
+ns                 IN A   127.0.0.1
+_bifrost           IN TXT "v=bf1 nodes=agent-dns,other-01,bad-node,evil"
+_bifrost.agent-dns IN TXT "v=bf1 host=127.0.0.1 port=2222 user=bf@TAGS@ path=/home/bf/data"
+_bifrost.other-01  IN TXT "v=bf1 host=127.0.0.1 port=2222 tags=misc"
+_bifrost.bad-node  IN TXT "v=bf1 host=-oProxyCommand=touch${IFS}@T@/pwned"
+_bifrost.evil      IN TXT "v=bf1 host=127.0.0.1 id=../../etc"
