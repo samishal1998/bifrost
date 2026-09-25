@@ -16,8 +16,8 @@ use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
 const USAGE: &str = "usage: bifrost-tui [--socket PATH]
-  --socket PATH  daemon socket [default: $BIFROST_SOCKET, else $XDG_RUNTIME_DIR/bifrost/bifrost.sock;
-                 macOS ~/Library/Caches/bifrost/bifrost.sock]";
+  --socket PATH  daemon socket [default: $BIFROST_SOCKET, else $XDG_RUNTIME_DIR/bifrost/bifrost.sock,
+                 else ~/.cache/bifrost/bifrost.sock; macOS ~/Library/Caches/bifrost/bifrost.sock]";
 
 /// The routes return at once (§10); this only bounds a wedged daemon.
 const CMD_TIMEOUT: Duration = Duration::from_secs(5);

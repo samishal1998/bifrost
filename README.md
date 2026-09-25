@@ -29,7 +29,7 @@ Design documents: the PRD (`bifrost_prd_and_implementation_plan.md`) and the imp
 
 ```bash
 cargo build --release          # Rust ≥ 1.89 (edition 2024)
-install -m 755 target/release/{bifrost,bifrostd,bifrost-tui} ~/.local/bin/
+mkdir -p ~/.local/bin && install -m 755 target/release/{bifrost,bifrostd,bifrost-tui} ~/.local/bin/
 ```
 
 With `CARGO_TARGET_DIR` set, the binaries land in `$CARGO_TARGET_DIR/release/` instead. There are three:
@@ -48,7 +48,7 @@ macOS), so a minimal service PATH still works:
 - macOS: macFUSE or FUSE-T for `sshfs`/`rclone`; `rclone` alone for `rclone-nfs`.
 - `tailscale`: only for the Tailscale provider.
 
-`bifrost doctor` checks all of this.
+`bifrost doctor` checks all of this (the `tailscale` binary through the running daemon's provider status).
 
 ## Quickstart
 
@@ -94,8 +94,9 @@ you pass `--no-wait`.
 **Rules:**
 - A missing config file runs an empty default (root `~/machines`, no machines), with a warning.
 - An invalid config stops `bifrostd` from starting (exit 2), so it never unmounts everything.
-- Edits are picked up automatically (polled every 2s), or at once with `bifrost config reload` or SIGHUP. An
-  invalid edit keeps the running config and shows in `bifrost status`. Changing `mount.root` needs a restart.
+- Edits are picked up automatically (polled every 2s; applied once two reads agree, so within 2–4s), or at once
+  with `bifrost config reload` or SIGHUP. An invalid edit keeps the running config and shows in `bifrost status`.
+  Changing `mount.root` needs a restart.
 - Unknown keys are errors, so a typo or a `password = …` line is rejected. `bifrost config check [PATH]` prints
   every error sorted, the same bytes every time.
 - `~`, `$VAR` and `${VAR}` are expanded only in `mount.root`, `mount.ssh_config`, `discovery.url` and header
@@ -224,7 +225,7 @@ The rules, evaluated in this order:
    observation counts: static < tailscale < http < dns (lower is more trusted). It alone decides address, user,
    tags, metadata and the verdict. The losers are listed as `shadowed`. So a DNS or HTTP record can never
    redirect, re-tag or deny a machine that config or Tailscale also reports. To hand such a machine to DNS,
-   exclude it in the more trusted provider's filter.
+   exclude it in the more trusted provider's filter (for a static machine, remove it from `[[machines]]`).
 3. **Deny wins.** A global `[policy.deny]` match denies, static machines included.
 4. **Static = explicit allow.** Machines in `[[machines]]` are allowed unless denied.
 5. **Provider include.** If a provider's `include_*` rules all match, the machine is allowed.
@@ -259,7 +260,8 @@ skipped one by one with a warning in the daemon log.
 - runs `tailscale status --json` (10s timeout); it never runs `tailscale up`, `down` or `set`;
 - the binary comes from `$PATH` and the fixed dirs above, else on macOS
   `/Applications/Tailscale.app/Contents/MacOS/Tailscale`;
-- the id is the first label of the MagicDNS name. The address is that name, else the first Tailscale IP;
+- the id is the first label of the MagicDNS name, else the lowercased hostname. The address is the MagicDNS name
+  when MagicDNS is on, else the first Tailscale IPv4 address (the first Tailscale IP if there is none);
 - tags lose their `tag:` prefix; `Self` is never listed;
 - with no filter and no global allow, every peer is discover-only.
 
@@ -325,7 +327,8 @@ mounting.
 
 ## CLI
 
-Global flags: `--json` (print the API's JSON), `--socket PATH`, `--config PATH`.
+Global flags: `--json` (print the API's JSON), `--socket PATH`, `--config PATH` (read only by `config check`,
+`doctor` and a daemon-less `drivers`; the daemon's own config comes from `$BIFROST_CONFIG`, else the default path).
 
 | command | what it does |
 |---|---|
@@ -343,8 +346,8 @@ Global flags: `--json` (print the API's JSON), `--socket PATH`, `--config PATH`.
 | `bifrost config reload` | make the daemon reload now |
 | `bifrost daemon status` | running or not |
 
-Exit codes: `0` ok · `1` failed (API error, mount failed, unmount busy, invalid config; for `doctor`: an invalid
-config, no usable driver, or the macOS permission hint) · `2` usage · `3` daemon not reachable.
+Exit codes: `0` ok · `1` failed (API error, mount failed, unmount busy, invalid config; for `doctor`: a missing or
+invalid config file, no usable driver, or the macOS permission hint) · `2` usage · `3` daemon not reachable.
 
 `bifrostd` takes only `--version` and `--help`. Everything else comes from the `BIFROST_*` environment variables.
 Live events stream over SSE: `curl -sN --unix-socket "$sock" http://bifrost/v1/events`.

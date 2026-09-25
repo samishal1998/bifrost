@@ -58,17 +58,19 @@ check_p13() {
   ok "p13: duplicate: dns shadowed on inv-01 within 20s" wait_until 20 p10_mjq inv-01 'any(.shadowed[]; . == "dns")'
   ok "p13: duplicate: exactly one machine inv-01" p13_count machines '.id == "inv-01"' 1
   ok "p13: duplicate: inv-01 source inventory, address still 127.0.0.1" p10_mjq inv-01 \
-    '.source == "inventory" and .address == "127.0.0.1" and .verdict == "allowed (inventory.filter.include)"'
+    '.source == "inventory" and .address == "127.0.0.1" and .tags == ["e2e"]
+     and .verdict == "allowed (inventory.filter.include)"'
   sleep 3 # a pass and a health tick with both observations
-  ok "p13: duplicate: inv-01 has one mount, still bf@127.0.0.1" p13_count mounts \
-    '.machine == "inv-01" and .remote == "bf@127.0.0.1:/home/bf"' 1
+  ok "p13: duplicate: inv-01 has exactly one mount" p13_count mounts '.machine == "inv-01"' 1
+  ok "p13: duplicate: inv-01 still bf@127.0.0.1:/home/bf" mjq inv-01 '.remote == "bf@127.0.0.1:/home/bf"'
   ok "p13: duplicate: inv-01 not remounted (same pid)" mjq inv-01 ".state == \"mounted\" and .pid == $pid"
 
   t0=$SECONDS
   p13_zone 6 "$renamed" "$dup"
-  sleep 3 # < 3 × discovery_interval (9s) since the last refresh that still listed agent-dns
-  ok "p13: rename: agent-dns still mounted 3s later (removal hysteresis)" state_is agent-dns mounted
   ok "p13: serial 6 served (agent-dns → agent-dns2)" wait_until 10 p13_serial 6
+  # the first refresh listing agent-dns2 is the first without agent-dns (one index): ~6s of its 9s floor remain
+  ok "p13: rename: agent-dns2 discovered within 20s" wait_until 20 p13_count machines '.id == "agent-dns2"' 1
+  ok "p13: rename: agent-dns still mounted once agent-dns2 is listed (removal hysteresis)" state_is agent-dns mounted
   ok "p13: rename: old agent-dns unmounted and removed within 25s" wait_until 25 gone "$mp"
   echo "  (agent-dns gone $((SECONDS - t0))s after the rename)"
   ok "p13: rename: agent-dns no longer listed" p08_no_machine agent-dns
