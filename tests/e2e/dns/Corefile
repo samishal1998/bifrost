@@ -1,0 +1,5 @@
+test.bifrost:53 {
+    file /zones/db {
+        reload 1s
+    }
+}
