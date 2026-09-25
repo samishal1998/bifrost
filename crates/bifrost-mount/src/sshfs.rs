@@ -61,7 +61,7 @@ pub fn sshfs_argv(spec: &MountSpec, ssh_config: Option<&Path>, f: Flavor) -> Vec
         SSH_OPTS.join(",").into(),
         "-o".into(),
         match f {
-            // a SIGKILLed sshfs is unmounted by the fusermount3 helper (fuse3 ≥ 3.15; 3.14 leaves it ENOTCONN → Stale)
+            // meant to unmount a SIGKILLed sshfs; fuse3 3.14 (verified) leaves it ENOTCONN → Stale → lazy detach
             Flavor::Linux => "auto_unmount".into(),
             Flavor::MacFuse => format!("volname={id},noappledouble").into(),
             Flavor::FuseT => format!("volname={id}").into(),

@@ -332,7 +332,7 @@ pub(crate) async fn mount_with(
             )));
         }
         if tokio::time::Instant::now() >= deadline {
-            // ponytail: no process is ever signalled except this, our own spawn that never finished mounting; none (deliberate: killing loses data)
+            // ponytail: this timed-out spawn of ours is the only process ever signalled, no orphan scan (one stuck in connect lives until ConnectTimeout; a lazily detached sshfs lingers until its last reference closes); none (deliberate: killing loses data)
             let _ = child.start_kill();
             let _ = child.wait().await;
             if ours() {
