@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"            # File::try_lock
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+bifrost-core      = { path = "crates/bifrost-core" }
+bifrost-config    = { path = "crates/bifrost-config" }
+bifrost-discovery = { path = "crates/bifrost-discovery" }
+bifrost-mount     = { path = "crates/bifrost-mount" }
+bifrost-client    = { path = "crates/bifrost-client" }
+tokio = { version = "1.53.1", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+toml = { version = "1.1.5", default-features = false, features = ["std", "serde", "parse"] }
+thiserror = "2.0.20"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "ansi"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
+ratatui = "0.30.2"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+hyper = { version = "1.11.1", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+http-body-util = "0.1.5"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+hickory-resolver = "0.26.3"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots"] }
+libc = "0.2.189"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# not panic = "abort": a panicking task must not kill the daemon

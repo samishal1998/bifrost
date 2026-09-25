@@ -1,0 +1,19 @@
+[package]
+name = "bifrost-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bifrost"
+path = "src/main.rs"
+
+[dependencies]
+bifrost-core.workspace = true
+bifrost-config.workspace = true
+bifrost-client.workspace = true
+bifrost-mount.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
