@@ -231,7 +231,8 @@ fn create_dirs(p: &Path) -> io::Result<bool> {
                 std::fs::set_permissions(d, Permissions::from_mode(0o700))?; // whatever the umask did
                 false
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => true,
+            // macOS mkdir("/") is EISDIR, not EEXIST; std's create_dir_all uses the same is_dir fallback
+            Err(e) if e.kind() == ErrorKind::AlreadyExists || d.is_dir() => true,
             Err(e) => return Err(e),
         };
     }
@@ -261,12 +262,17 @@ fn lock(state_dir: &Path) -> Result<(File, u32), String> {
         }
         Err(TryLockError::Error(e)) => return Err(at(e)),
     }
-    let uid = f.metadata().map_err(at)?.uid();
-    Ok((f, uid))
+    let m = f.metadata().map_err(at)?;
+    // opened for writing and not group/other-writable ⇒ this user owns it, so it is a valid §8 uid reference
+    // (a hostile pre-created 0666 lock would otherwise make an attacker's state dir pass the ownership check)
+    if m.mode() & 0o022 != 0 {
+        return Err(format!("{} is writable by group or others", p.display()));
+    }
+    Ok((f, m.uid()))
 }
 
 /// Step 9: the parent as in `create_dirs` (ownership-checked when it pre-existed), ≤103 bytes (sun_path), a stale
-/// socket removed (the lock proves nobody serves it), bound, then 0600.
+/// socket removed (only when nothing answers on it), bound, then 0600.
 fn bind_socket(path: &Path, uid: u32) -> Result<UnixListener, String> {
     let n = path.as_os_str().len();
     if n > 103 {
@@ -283,7 +289,13 @@ fn bind_socket(path: &Path, uid: u32) -> Result<UnixListener, String> {
         return Err(format!("{} is not owned by this user", parent.display()));
     }
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_socket() => std::fs::remove_file(path).map_err(at)?,
+        Ok(m) if m.file_type().is_socket() => {
+            // the lock is per state dir, the socket per BIFROST_SOCKET: a live one belongs to another bifrostd
+            if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                return Err(format!("{} is in use by another bifrostd", path.display()));
+            }
+            std::fs::remove_file(path).map_err(at)?
+        }
         Ok(_) => return Err(format!("{} exists and is not a socket", path.display())),
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(at(e)),
@@ -314,6 +326,10 @@ mod tests {
         assert!(e.contains("already running"), "{e}");
         drop(first);
         assert!(lock(&r.dir).is_ok());
+        // a pre-created writable-by-others lock is no uid reference (§8): it could be anyone's
+        std::fs::set_permissions(r.dir.join("bifrostd.lock"), Permissions::from_mode(0o666))
+            .unwrap();
+        assert!(lock(&r.dir).is_err());
     }
 
     #[tokio::test]
@@ -344,6 +360,11 @@ mod tests {
         std::fs::write(home.join("file"), "x").unwrap();
         assert!(bind_socket(&home.join("file"), uid).is_err());
         assert_eq!(std::fs::read_to_string(home.join("file")).unwrap(), "x");
+        // nor is a live socket: the lock is per state dir, so it can be another bifrostd's
+        let live = home.join("live.sock");
+        let _other = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        assert!(bind_socket(&live, uid).err().unwrap().contains("in use"));
+        assert!(live.exists());
         // sun_path limit
         let long = home.join("x".repeat(120));
         assert!(bind_socket(&long, uid).err().unwrap().contains("103"));

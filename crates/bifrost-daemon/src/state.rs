@@ -16,25 +16,22 @@ pub struct State {
     pub mounts: BTreeMap<MountId, MountHandle>,
 }
 
-/// Missing → empty. Unparseable (or another version) → renamed to `state.json.corrupt-<unix>`, then empty.
+/// Missing → empty. Unreadable, unparseable (or another version) → renamed to `state.json.corrupt-<unix>`, then empty.
 pub fn read(dir: &Path) -> State {
     let p = dir.join("state.json");
+    // unreadable is quarantined like unparseable: the next write must not replace the holds without a copy
     let bytes = match std::fs::read(&p) {
-        Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return State::default(),
-        Err(e) => {
-            tracing::warn!("{}: {e}; starting without it", p.display());
-            return State::default();
-        }
+        r => r.map_err(|e| e.to_string()),
     };
-    match serde_json::from_slice::<State>(&bytes) {
+    match bytes.and_then(|b| serde_json::from_slice::<State>(&b).map_err(|e| e.to_string())) {
         Ok(s) if s.version == 1 => s,
         r => {
             let secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             let q = dir.join(format!("state.json.corrupt-{secs}"));
-            let why = r.err().map_or("unknown version".into(), |e| e.to_string());
+            let why = r.err().unwrap_or_else(|| "unknown version".into());
             tracing::warn!("{}: {why}; moved to {}", p.display(), q.display());
             let _ = std::fs::rename(&p, &q);
             State::default()
@@ -105,6 +102,15 @@ mod tests {
         assert!(!names.contains(&"state.json".to_string()), "{names:?}");
         let q = names.iter().find(|n| n.starts_with("state.json.corrupt-"));
         assert_eq!(std::fs::read_to_string(dir.join(q.unwrap())).unwrap(), bad);
+
+        // unreadable (here EISDIR) is quarantined too, never overwritten by the next write
+        std::fs::remove_file(dir.join(q.unwrap())).unwrap(); // the quarantine name is per second
+        std::fs::create_dir_all(dir.join("state.json/x")).unwrap();
+        assert_eq!(read(&dir), State::default());
+        assert!(!dir.join("state.json").exists());
+        let q = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path());
+        let q = q.filter(|p| p.to_string_lossy().contains("state.json.corrupt-"));
+        assert!(q.collect::<Vec<_>>()[0].join("x").is_dir());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

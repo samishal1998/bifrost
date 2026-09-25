@@ -404,10 +404,11 @@ impl Actor {
                 generation,
                 detail,
             } => {
-                info!(mount = id.as_str(), %detail, "mount process exited");
-                // no state change: probe it now; ignored once an unmount began (a newer generation, §5)
+                info!(mount = id.as_str(), generation, %detail, "mount process exited");
+                // no state change: probe it now; ignored while Unmounting (§5). Not generation-gated: a failed
+                // unmount leaves Mounted at a newer generation, and a stale exit costs only one harmless inspect
                 let rt = self.runtimes.get(&id);
-                if rt.is_some_and(|rt| rt.generation == generation && rt.phase == Phase::Mounted) {
+                if rt.is_some_and(|rt| rt.phase == Phase::Mounted) {
                     self.inspect(&id);
                 }
             }
@@ -1537,6 +1538,27 @@ pub(crate) mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::MountFailed { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn exit_after_failed_unmount_probed() {
+        let r = rig("exit-busy");
+        let mut h = r.start(r.cfg(SLOW_RETRY, &machine("a")), true, &[], &[]);
+        h.until("mounted", |s| is(s, "a", Availability::Mounted))
+            .await;
+        r.drv.fake.busy.lock().unwrap().insert(id("a"));
+        ok(h.unmount("a", false).await);
+        h.until("busy", |s| {
+            mount(s, "a").is_some_and(|m| m.last_error.as_deref() == Some(BUSY))
+        })
+        .await;
+        // back to Mounted, a generation past the one on_exit captured; the health ticker is 1h away
+        let n = r.drv.inspects.load(SeqCst);
+        r.drv.fake.mounted.lock().unwrap().remove(&id("a"));
+        r.drv.fake.exit("a", "signal: 9 (SIGKILL)");
+        h.until("gone noticed", |s| !is(s, "a", Availability::Mounted))
+            .await;
+        assert!(r.drv.inspects.load(SeqCst) > n);
     }
 
     #[tokio::test]
