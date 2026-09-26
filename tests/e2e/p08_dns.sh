@@ -1,8 +1,9 @@
 # p08 (all): DNS TXT bf1 discovery against CoreDNS on 127.0.0.1:5353 (contract §12). Machines are inline node
-# records at the root; other-01 comes from the index and its own record. Hostile records: bad-node publishes an
-# ssh option as its host, evil a path-traversal id; both must be skipped with a warning and the canary $T/pwned
-# must never exist. Big RRset: 20 discover-only bulk-NN nodes push the root answer past a 1232-byte UDP reply,
-# so they are only seen through hickory's TCP retry. This is the ONLY fragment with [policy.*] tables (B5).
+# records at the root; other-01 and evil come from the index and their own records. Hostile records: bad-node
+# (inline) publishes an ssh option as its host, evil (index) a path-traversal id; both must be skipped with a
+# warning and the canary $T/pwned must never exist. Big RRset: 20 discover-only bulk-NN nodes push the root
+# answer past a 1232-byte UDP reply, so they are only seen through hickory's TCP retry. This is the ONLY
+# fragment with [policy.*] tables (B5).
 
 # p08_zone SERIAL TAGS : render dns/zone.tmpl plus the bulk nodes into $T/dns/db (tmp + mv; coredns reloads on
 # a higher serial).
@@ -79,7 +80,7 @@ check_p08() {
   ok "p08: bad-node absent" p08_no_machine bad-node
   ok "p08: evil absent" p08_no_machine evil
   ok "p08: bad-node warned in d.log" grep -q 'bf1 node skipped.*node="bad-node".*invalid host' "$T/d.log"
-  ok "p08: evil warned in d.log" grep -q 'bf1 node skipped.*node="evil".*invalid native id' "$T/d.log"
+  ok "p08: evil warned in d.log" grep -q 'bf1 node skipped.*_bifrost\.evil\..*invalid native id' "$T/d.log"
   ok "p08: canary \$T/pwned never created" not test -e "$T/pwned"
   ok "p08: big RRset: all 20 bulk nodes discover-only" wait_until 10 p08_bulk
   ok "p08: big RRset: the daemon read the root over TCP (coredns log)" p08_tcp_log

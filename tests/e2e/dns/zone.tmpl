@@ -1,15 +1,16 @@
 ; p08 zone (contract §12), rendered by p08_zone in tests/e2e/p08_dns.sh:
 ; @SERIAL@ = SOA serial (coredns reloads on a bump), @TAGS@ = " tags=dev" or "", @T@ = the run's $T.
-; Machines are inline node records at the root (node=); other-01 alone is listed in the index and has its own
-; record (the mixed form). bad-node and evil are hostile: an ssh option as the host, a path-traversal id. Both
-; must be skipped. p08_zone appends 20 inline bulk-NN nodes so the root answer outgrows a UDP reply.
+; Machines are inline node records at the root (node=); other-01 and evil are listed in the index and have their
+; own records (the mixed form). bad-node (inline, an ssh option as the host) and evil (index, a path-traversal
+; id) are hostile, one per path; both must be skipped. p08_zone appends 20 inline bulk-NN nodes so the root
+; answer outgrows a UDP reply.
 $ORIGIN test.bifrost.
 $TTL 5
 @                  IN SOA ns admin @SERIAL@ 60 60 3600 5
 @                  IN NS  ns
 ns                 IN A   127.0.0.1
-_bifrost           IN TXT "v=bf1 nodes=other-01"
+_bifrost           IN TXT "v=bf1 nodes=other-01,evil"
 _bifrost           IN TXT "v=bf1 node=agent-dns host=127.0.0.1 port=2222 user=bf@TAGS@ path=/home/bf/data"
 _bifrost           IN TXT "v=bf1 node=bad-node host=-oProxyCommand=touch${IFS}@T@/pwned"
-_bifrost           IN TXT "v=bf1 node=evil host=127.0.0.1 id=../../etc"
 _bifrost.other-01  IN TXT "v=bf1 host=127.0.0.1 port=2222 tags=misc"
+_bifrost.evil      IN TXT "v=bf1 host=127.0.0.1 id=../../etc"

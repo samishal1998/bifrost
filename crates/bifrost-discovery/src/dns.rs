@@ -286,7 +286,8 @@ fn txts(l: &Lookup) -> Vec<String> {
 }
 
 /// The root RRset → (index nodes to look up, inline node observations). A `v=bf1` value with a `node=` token
-/// is an inline node record, grouped by that label before parsing so an invalid one still rejects its node;
+/// is an inline node record, grouped by that label (not a DNS label → skipped, no cap slot) before parsing so
+/// an invalid value still rejects its node;
 /// any other valid bf1 value is an index value whose `nodes=` count (an invalid one is skipped with a warning).
 /// At most MAX_NODES labels of the sorted union; a label both inline and in `nodes=` is ambiguous and skipped.
 /// Inline ttl = the root's validity.
@@ -304,7 +305,16 @@ fn root(
             .strip_prefix("v=bf1 ")
             .and_then(|t| t.split(' ').find_map(|t| t.strip_prefix("node=")));
         if let Some(n) = label {
-            inline.entry(n.to_string()).or_default().push(s.clone());
+            match dns_label(n) {
+                Ok(n) => inline.entry(n).or_default().push(s),
+                Err(e) => warn!(
+                    provider,
+                    record,
+                    node = clean(n, 128),
+                    reason = clean(&e.to_string(), 512),
+                    "bf1 node skipped"
+                ),
+            }
             continue;
         }
         match parse_bf1(&s) {
@@ -738,6 +748,7 @@ mod tests {
             .map(|c| format!("v=bf1 nodes={}", c.join(",")))
             .collect();
         vals.extend(names[200..].iter().map(|n| format!("v=bf1 node={n}")));
+        vals.push("v=bf1 node=A".into()); // not a label: takes no slot (sorts first)
         let (look, obs) = rt(&vals.iter().map(String::as_str).collect::<Vec<_>>());
         assert_eq!(look, names[..200]);
         assert_eq!(ids(&obs), names[200..256]);
@@ -755,8 +766,8 @@ mod tests {
     }
 
     /// hickory retries a truncated UDP answer over TCP only on a server with a TCP connection. A big inline
-    /// root RRset outgrows a 1232-byte UDP reply, so the system resolver's servers must have one too, like
-    /// the explicit `udp_and_tcp` ones.
+    /// root RRset outgrows a UDP reply (1232 bytes with EDNS; 512 on unix unless resolv.conf has
+    /// `options edns0`), so the system resolver's servers must have one too, like the explicit `udp_and_tcp` ones.
     #[cfg(target_os = "linux")]
     #[test]
     fn system_resolver_has_tcp_fallback() {
