@@ -170,7 +170,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bifrost-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bifrost-client",
  "bifrost-config",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "http-body-util",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bifrost-core",
  "serde",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bifrost-client",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-discovery"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bifrost-core",
  "hickory-resolver",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-mount"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bifrost-core",
  "libc",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bifrost-client",
  "bifrost-config",
