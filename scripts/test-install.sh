@@ -6,6 +6,7 @@
 # an unwritable install dir and a hostile BIFROST_VERSION must all fail with nothing installed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+[ $# -gt 0 ] || cargo build -q -p bifrost-cli -p bifrost-daemon -p bifrost-tui # `cargo test` alone skips bifrostd, bifrost-tui
 bin=${1:-${CARGO_TARGET_DIR:-target}/debug}
 target=$(uname -m)-unknown-linux-musl
 asset=bifrost-$target.tar.gz
@@ -58,6 +59,16 @@ for sh in dash bash; do
 		echo "ok: $sh $how → $("$dir/bifrost" --version)"
 	done
 done
+
+# Relative install dir with a trailing slash, TMPDIR with a backslash: absolute PATH advice, hash still matches.
+mkdir -p "$work/rel" "$work/t\\mp"
+(cd "$work/rel" && BIFROST_DOWNLOAD_URL=$url/good BIFROST_INSTALL_DIR=inst/ TMPDIR="$work/t\\mp" dash "$OLDPWD/install.sh") >"$work/out" 2>&1 ||
+	{ cat "$work/out"; fail "relative dir install"; }
+grep -qF "export PATH=\"$work/rel/inst:\$PATH\"" "$work/out" || { cat "$work/out"; fail "relative dir: PATH advice not absolute"; }
+echo "ok: relative BIFROST_INSTALL_DIR, backslash TMPDIR"
+env -u HOME -u BIFROST_INSTALL_DIR dash install.sh >"$work/out" 2>&1 && fail "unset HOME: exited 0"
+grep -q 'HOME is not set' "$work/out" || { cat "$work/out"; fail "unset HOME: no message"; }
+echo "ok: unset HOME → $(grep error: "$work/out")"
 
 # expect_fail NAME PATTERN DIR [ENV=VAL...]: install.sh exits non-zero, says PATTERN, installs nothing into DIR.
 expect_fail() {

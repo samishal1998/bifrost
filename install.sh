@@ -46,6 +46,10 @@ main() {
 	aarch64 | arm64) arch=aarch64 ;;
 	*) die "unsupported CPU: $(uname -m) (Bifröst supports x86_64 and aarch64)" ;;
 	esac
+	# A shell under Rosetta reports x86_64 on Apple Silicon; install the native build anyway.
+	if [ "$os" = apple-darwin ] && [ "$arch" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+		arch=aarch64
+	fi
 	target=$arch-$os
 	asset=bifrost-$target.tar.gz
 
@@ -64,9 +68,11 @@ main() {
 	fi
 
 	# --- where to (checked before any download) ---
+	[ -n "${BIFROST_INSTALL_DIR:-}" ] || [ -n "${HOME:-}" ] || die "HOME is not set; set BIFROST_INSTALL_DIR to where the binaries should go"
 	dir=${BIFROST_INSTALL_DIR:-$HOME/.local/bin}
 	mkdir -p "$dir" 2>/dev/null || die "cannot create $dir; set BIFROST_INSTALL_DIR to a directory you can write (no sudo needed)"
 	[ -w "$dir" ] || die "$dir is not writable; set BIFROST_INSTALL_DIR to a directory you can write (no sudo needed)"
+	dir=$(CDPATH='' cd -- "$dir" && pwd) || die "cannot resolve $dir" # absolute, no trailing slash: for PATH advice and cleanup
 
 	# --- download and verify ---
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/bifrost.XXXXXX") || die "mktemp failed"
@@ -79,9 +85,9 @@ main() {
 	fetch "$base/$asset" "$tmp/$asset"
 
 	if have sha256sum; then
-		sum=$(sha256sum "$tmp/$asset")
+		sum=$(sha256sum <"$tmp/$asset") # stdin: an odd path cannot alter the output
 	elif have shasum; then
-		sum=$(shasum -a 256 "$tmp/$asset")
+		sum=$(shasum -a 256 <"$tmp/$asset")
 	else
 		die "need sha256sum or shasum to verify the download; refusing to install unverified binaries"
 	fi
