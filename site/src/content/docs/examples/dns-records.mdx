@@ -207,7 +207,9 @@ with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=age
    mounts    build-01
    ```
 
-4. A node that is missing was skipped. The daemon log says why ([see below](#what-gets-rejected)):
+4. Answers are cached for their TTL (`$TTL 300` above), so a record you just changed can take that long to show.
+   A node that is listed in the index and still missing after that was skipped. The daemon log says why
+   ([see below](#what-gets-rejected)):
 
    ```sh
    journalctl --user -u bifrost | grep bf1
