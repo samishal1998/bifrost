@@ -139,7 +139,7 @@ What this adds and removes:
 **Rules that keep parallel builds safe:**
 1. S0 writes every manifest in final form, runs `cargo generate-lockfile && cargo build --workspace --all-targets`, and commits `Cargo.lock`. After S0, no agent edits any `Cargo.toml` or the lockfile.
 2. S0 writes every public signature in §2, §3, §5 (`Msg`, `Tick` in `daemon/src/actor.rs`), §6, §7, §8 (`ApiCmd` in `daemon/src/api.rs`, `Deps` in `actor.rs`) and §9 as compiling stubs that follow the **safe-stub rule** (§13) (A3). S0 also fully implements and tests `core/validate.rs`, the `core/model.rs` helpers `MountSpec::{fingerprint, source}`, `marker`, `parse_marker` and `DriverSelector: TryFrom<String>` (A2), and `core/fake.rs`. Every `lib.rs` declares its modules in S0, so later agents only fill in files.
-3. Each agent works in its own worktree (`git worktree add ../bf-<agent> -b <agent>`), edits only the files it owns (§13), and builds with `cargo test -p <crate>`. **All agents share `CARGO_TARGET_DIR=/home/samimishal/projects/rust/bifrost-target`** (P2): with 4 CPUs and about 2 GB free RAM, compiling the dependencies once beats per-worktree builds, and the workflow cap is 2 concurrent agents anyway.
+3. Each agent works in its own git worktree (`git worktree add <dir> -b <agent>`), edits only the files it owns (§13), and builds with `cargo test -p <crate>`. **All agents share one `CARGO_TARGET_DIR`** (P2): with 4 CPUs and about 2 GB free RAM, compiling the dependencies once beats per-worktree builds, and the workflow cap is 2 concurrent agents anyway.
 4. The orchestrator merges one branch at a time and runs `scripts/check.sh` after each merge (`cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`). A public signature changes only with the orchestrator's sign-off.
 
 **macOS compile check.** All OS-specific code lives in `bifrost-mount`, `bifrost-config::paths` and `bifrost-config::default_auto_order` (B8). `bifrost-discovery` and `bifrost-daemon` contain no macOS code except a runtime `cfg!()` in tailscale, which compiles on Linux. They are excluded because reqwest pulls in ring, and ring needs an Apple C toolchain (§15 row; the ring cross-compile experiment is deferred, B9).
@@ -1760,11 +1760,11 @@ Each item becomes a `// ponytail: <ceiling>; <upgrade>` comment at the named loc
 | 31 | `bifrostd` and `bifrost-discovery` are never darwin-checked: reqwest pulls in ring, whose C build needs an Apple toolchain this host lacks (B9; the ring cross-compile experiment is deferred) | macOS compile errors in the daemon or providers show up only on a Mac | a macOS runner, or retry `SDKROOT=/ CC_aarch64_apple_darwin=true AR_aarch64_apple_darwin=true cargo check --target aarch64-apple-darwin --workspace` | daemon/main.rs |
 
 ### Critical Files for Implementation
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-core/src/reconcile.rs
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-core/src/validate.rs
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-core/src/policy.rs
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-mount/src/lib.rs
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-daemon/src/actor.rs
+- crates/bifrost-core/src/reconcile.rs
+- crates/bifrost-core/src/validate.rs
+- crates/bifrost-core/src/policy.rs
+- crates/bifrost-mount/src/lib.rs
+- crates/bifrost-daemon/src/actor.rs
 
 ## Amendments (applied)
 
@@ -1826,7 +1826,7 @@ The critique triage from the approved plan, copied verbatim. IDs refer to `docs/
 | E5 | Cut `Candidate.fingerprint`, `MachineDto.eligible`, `DriverDto.auto_rank` and tailscale `metadata.tailscale_id` | S0 |
 | E6 | The TUI polls inline: `rt.block_on(timeout(500ms, get("/v1/status")))` once per second, with no poller task or channel | S3-L |
 | P1 | No `rustfmt.toml`; rustfmt defaults | S0 |
-| P2 | All agents share `CARGO_TARGET_DIR=/home/samimishal/projects/rust/bifrost-target`. With 4 CPUs and about 2 GB free RAM, compiling the dependencies once beats per-worktree builds; the workflow cap is 2 concurrent agents anyway. This replaces contract §1 rule 3 | all |
+| P2 | All agents share one `CARGO_TARGET_DIR`. With 4 CPUs and about 2 GB free RAM, compiling the dependencies once beats per-worktree builds; the workflow cap is 2 concurrent agents anyway. This replaces contract §1 rule 3 | all |
 
 ### Refinements (S0.2 verifier, round 1)
 

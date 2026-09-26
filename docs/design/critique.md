@@ -145,11 +145,9 @@ What doesn't hold, or is redundant:
    - tailscale `metadata.tailscale_id` duplicates `native_id`.
 6. Optional: the TUI poller task plus channel could be one `rt.block_on(timeout(500ms, get("/v1/status")))` per second in the UI loop.
 
-One process note: one of my crates.io API requests carried your email in its User-Agent header, which it shouldn't have. Every later request used a generic User-Agent.
-
 ### Critical Files for Implementation
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-core/src/reconcile.rs
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-core/src/policy.rs
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-mount/src/lib.rs
-- /home/samimishal/projects/rust/bifrost/crates/bifrost-daemon/src/actor.rs
-- /home/samimishal/projects/rust/bifrost/tests/e2e/run.sh
+- crates/bifrost-core/src/reconcile.rs
+- crates/bifrost-core/src/policy.rs
+- crates/bifrost-mount/src/lib.rs
+- crates/bifrost-daemon/src/actor.rs
+- tests/e2e/run.sh

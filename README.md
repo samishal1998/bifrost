@@ -8,6 +8,15 @@
 
 <p align="center"><strong>Remote worlds. Local files.</strong></p>
 
+<p align="center">
+  <a href="https://github.com/samishal1998/bifrost/actions/workflows/ci.yml"><img src="https://github.com/samishal1998/bifrost/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/samishal1998/bifrost/releases/latest"><img src="https://img.shields.io/github/v/release/samishal1998/bifrost" alt="Latest release"></a>
+  <a href="https://samishal1998.github.io/bifrost/"><img src="https://github.com/samishal1998/bifrost/actions/workflows/pages.yml/badge.svg" alt="Docs"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2DD4BF" alt="License: MIT OR Apache-2.0"></a>
+</p>
+
+<p align="center"><a href="https://samishal1998.github.io/bifrost/"><strong>Documentation</strong></a> · <a href="https://github.com/samishal1998/bifrost/releases">Releases</a></p>
+
 # Bifröst
 
 **What it is.** Bifröst is a daemon (`bifrostd`) that makes remote machines look like local folders. It finds
@@ -25,7 +34,42 @@ discovery providers → machine registry → policy → desired mounts → recon
 Design documents: the PRD (`bifrost_prd_and_implementation_plan.md`) and the implementation contract
 (`docs/design/contract.md`, authoritative where they differ).
 
-## Install and build
+## Install
+
+```bash
+curl -fsSL https://samishal1998.github.io/bifrost/install.sh | sh
+```
+
+If GitHub Pages is unreachable, the same script is served from the repository:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/samishal1998/bifrost/main/install.sh | sh
+```
+
+The installer picks the prebuilt release for your platform (Linux x86_64/aarch64, static musl; macOS
+x86_64/arm64), checks it against the release's `SHA256SUMS` and refuses to install on a mismatch. It installs
+`bifrost`, `bifrostd` and `bifrost-tui` into `~/.local/bin` without sudo, then reports which runtime
+dependencies are missing. It never installs them itself.
+
+| variable | default | meaning |
+|---|---|---|
+| `BIFROST_VERSION` | latest | release tag to install, e.g. `v0.1.0` |
+| `BIFROST_INSTALL_DIR` | `$HOME/.local/bin` | where the three binaries go |
+| `BIFROST_DOWNLOAD_URL` | GitHub Releases | base URL for mirrors or tests; the script fetches `<base>/<asset>` |
+
+Put the variables on `sh`, not on `curl`, since they are read by the script:
+
+```bash
+curl -fsSL https://samishal1998.github.io/bifrost/install.sh | BIFROST_VERSION=v0.1.0 BIFROST_INSTALL_DIR="$HOME/bin" sh
+```
+
+To install by hand, download `bifrost-<target>.tar.gz` and `SHA256SUMS` from the
+[latest release](https://github.com/samishal1998/bifrost/releases/latest), verify it with
+`grep ' bifrost-<target>.tar.gz$' SHA256SUMS | sha256sum -c` (`shasum -a 256 -c` on macOS), and copy the three
+binaries from `bifrost-<target>/` onto your `PATH`. The targets are `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`, `x86_64-apple-darwin` and `aarch64-apple-darwin`.
+
+### Build from source
 
 ```bash
 cargo build --release          # Rust ≥ 1.89 (edition 2024)
@@ -40,8 +84,10 @@ With `CARGO_TARGET_DIR` set, the binaries land in `$CARGO_TARGET_DIR/release/` i
 | `bifrost` | the CLI |
 | `bifrost-tui` | the terminal UI |
 
-Runtime dependencies, found through `$PATH` plus `/usr/local/bin:/usr/bin:/bin` (and `/opt/homebrew/bin` on
-macOS), so a minimal service PATH still works:
+### Runtime dependencies
+
+They are found through `$PATH` plus `/usr/local/bin:/usr/bin:/bin` (and `/opt/homebrew/bin` on macOS), so a
+minimal service PATH still works:
 
 - `ssh` (OpenSSH client): always. Every driver goes through the system ssh.
 - Linux: `sshfs` and/or `rclone`, plus FUSE 3 (`/dev/fuse` and `fusermount3`, package `fuse3`).
@@ -458,10 +504,12 @@ journalctl --user -u bifrost -f
 
 ## macOS notes
 
-macOS support is **compile-checked only**:
-- `cargo check`/`clippy` for `aarch64-apple-darwin` pass for core, config, mount, client, cli and tui;
-- `bifrostd` and the discovery crate aren't cross-checked at all (reqwest's `ring` needs an Apple toolchain);
-- runtime behaviour on a Mac has not been exercised.
+macOS support is **built but not field-tested**:
+- the release binaries for `x86_64-apple-darwin` and `aarch64-apple-darwin` are built on GitHub's macOS
+  runners, and CI builds and unit-tests the workspace there;
+- mounting on a real Mac (macFUSE, FUSE-T, `rclone nfsmount`) has not been exercised;
+- from Linux, `cargo check`/`clippy` for `aarch64-apple-darwin` cover core, config, mount, client, cli and tui
+  (see Development); `bifrostd` and the discovery crate need an Apple toolchain (reqwest's `ring`).
 
 What the macOS code does:
 - FUSE: macFUSE is detected at `/Library/Filesystems/macfuse.fs`, FUSE-T at `/Library/Application Support/fuse-t`
@@ -513,3 +561,15 @@ cargo clippy --target aarch64-apple-darwin -p bifrost-core -p bifrost-config -p 
 
 Crates: `bifrost-core` (models, policy, registry, planner; no I/O), `bifrost-config`, `bifrost-discovery`,
 `bifrost-mount`, `bifrost-client`, `bifrost-daemon` (`bifrostd`), `bifrost-cli` (`bifrost`), `bifrost-tui`.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Bifröst by you,
+as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
