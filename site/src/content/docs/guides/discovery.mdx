@@ -88,41 +88,53 @@ user = "ubuntu"
 honor_hints = true
 ```
 
-Publish one index record, then one record per node:
+Publish one TXT record set at `_bifrost.<domain>`, one value per machine:
 
 ```text
-_bifrost.infra.example.com.          TXT "v=bf1 nodes=agent-01,agent-02"
-_bifrost.agent-01.infra.example.com. TXT "v=bf1 host=10.0.0.5 port=22 user=sami tags=dev,agent path=/home/sami"
-_bifrost.agent-02.infra.example.com. TXT "v=bf1 tags=dev"
+_bifrost.infra.example.com. TXT "v=bf1 node=agent-01 host=10.0.0.5 port=22 user=sami tags=dev,agent path=/home/sami"
+_bifrost.infra.example.com. TXT "v=bf1 node=agent-02 tags=dev"
 ```
 
-A complete zone, the same records in Cloudflare, Route 53, dnsmasq and CoreDNS, and how to check them:
-[DNS records](/bifrost/examples/dns-records/).
+Beyond about a dozen machines, list them in an index value instead, and give each one a record of its own:
+
+```text
+_bifrost.infra.example.com.          TXT "v=bf1 nodes=build-01,build-02"
+_bifrost.build-01.infra.example.com. TXT "v=bf1 host=10.0.0.18 tags=ci"
+_bifrost.build-02.infra.example.com. TXT "v=bf1 host=10.0.0.19 tags=ci"
+```
+
+Both forms mix in one record set. A complete zone, the same records in Cloudflare, Route 53, dnsmasq and CoreDNS,
+how to check them, and when to use the index: [DNS records](/bifrost/examples/dns-records/).
 
 ### Record format
 
-A record is space-separated `key=value` tokens, and `v=bf1` must come first. Records that don't start with
-`v=bf1` (SPF and friends) are ignored.
+A value is space-separated `key=value` tokens, and `v=bf1` must come first. Values that don't start with
+`v=bf1` (SPF and friends) are ignored. *Root* keys go only in values at `_bifrost.<domain>`; *machine* keys go in an
+inline value or a per-node record.
 
 | Key | Where | Value |
 |---|---|---|
-| `v` | both | `bf1`, first |
-| `nodes` | index | comma-separated node labels: `[a-z0-9-]`, no dots, 256 nodes at most |
-| `host` | node | connect target, hostname or IP. Default `<node>.<domain>` |
-| `port` | node | 1–65535 |
-| `user` | node | remote user, a hint used only with `honor_hints` |
-| `path` | node | remote path, a hint used only with `honor_hints` |
-| `tags` | node | comma-separated, at most 32 tags and 256 bytes |
-| `id` | node | a native id, matched only by this provider's `include_ids` / `exclude_ids` |
+| `v` | every value | `bf1`, first |
+| `node` | root | the node label, `[a-z0-9-]`, no dots. Makes the value an inline node record. Not with `nodes=` |
+| `nodes` | root | an index: comma-separated node labels. 256 nodes at most, inline and indexed together |
+| `host` | machine | connect target, hostname or IP. Default `<node>.<domain>` |
+| `port` | machine | 1–65535 |
+| `user` | machine | remote user, a hint used only with `honor_hints` |
+| `path` | machine | remote path, a hint used only with `honor_hints` |
+| `tags` | machine | comma-separated, at most 32 tags and 256 bytes |
+| `id` | machine | a native id, matched only by this provider's `include_ids` / `exclude_ids` |
 
 - **Identity is the node label** (`agent-01`), never `id=`. Labels have no dots, so an index can't send queries to
   another domain. Every name is queried absolute, so search domains never apply.
-- A record over 2 KiB, a duplicate key, or any key that fails validation (say `host=-oProxyCommand=…`) rejects the
-  **whole node**. Two different bf1 records for one node are ambiguous, and the node is skipped.
+- A value over 2 KiB, a duplicate key, or any key that fails validation (say `host=-oProxyCommand=…`) rejects the
+  **whole node**. Two different values for one node, or a node both inline and in `nodes=`, are ambiguous, and
+  the node is skipped.
 - Unknown keys, `driver=` included, are ignored.
+- A truncated UDP answer is retried over TCP, so a record set bigger than one UDP reply (about a dozen values)
+  needs a server that answers on TCP port 53.
 - Changes show up on the first refresh after the record's TTL (resolvers cache). Without `nameservers`, the
   system resolver config is re-read on every refresh, so a network or VPN change is picked up.
-- DNSSEC is not checked, and the inline form with `host=` on the root record is not supported.
+- DNSSEC is not checked.
 - With no filter and no global allow, every node is discover-only.
 
 ## HTTP inventory

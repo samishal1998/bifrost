@@ -1,13 +1,14 @@
 ---
 title: DNS records
-description: A complete bf1 zone, the same records in Cloudflare, Route 53, dnsmasq and CoreDNS, and how to check what Bifröst sees.
+description: A complete bf1 zone, the same records in Cloudflare, Route 53, dnsmasq and CoreDNS, how to check what Bifröst sees, and the index form for large fleets.
 ---
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 Copy-paste examples for the [DNS TXT provider](/bifrost/guides/discovery/#dns-txt-bf1). They all publish the same
-three machines under `infra.example.com`: one index record lists the node labels, and each node has one record
-of its own.
+three machines under `infra.example.com` as one TXT record set at `_bifrost.infra.example.com`, one value per
+machine. Such an *inline* value names its machine with `node=`. For more than about a dozen machines, see
+[Large fleets](#large-fleets-index--per-node-records).
 
 ## A complete zone
 
@@ -20,18 +21,15 @@ $TTL 300
 @                   IN NS  ns1
 ns1                 IN A   10.0.0.2
 
-; the index: every node label, comma-separated, no spaces
-_bifrost            IN TXT "v=bf1 nodes=agent-01,agent-02,build-01"
+; one TXT record set, one value per machine
+; agent-01: no host=, so bifrost connects to agent-01.infra.example.com
+_bifrost            IN TXT "v=bf1 node=agent-01 tags=dev,agent"
+; agent-02: an explicit address
+_bifrost            IN TXT "v=bf1 node=agent-02 host=10.0.0.12 tags=dev"
+; build-01: every key
+_bifrost            IN TXT "v=bf1 node=build-01 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
 
-; defaults: no host=, so bifrost connects to agent-01.infra.example.com
-_bifrost.agent-01   IN TXT "v=bf1 tags=dev,agent"
 agent-01            IN A   10.0.0.11
-
-; an explicit address
-_bifrost.agent-02   IN TXT "v=bf1 host=10.0.0.12 tags=dev"
-
-; every key
-_bifrost.build-01   IN TXT "v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
 ```
 
 <Aside type="caution">
@@ -57,13 +55,13 @@ user = "ubuntu"
 honor_hints = true
 ```
 
-| Node record | Machine id | Connects to | Mounts as | Tags |
+| Value | Machine id | Connects to | Mounts as | Tags |
 |---|---|---|---|---|
-| `_bifrost.agent-01` | `agent-01` | `agent-01.infra.example.com`, ssh's port | `ubuntu`, from `~` | `agent`, `dev` |
-| `_bifrost.agent-02` | `agent-02` | `10.0.0.12`, ssh's port | `ubuntu`, from `~` | `dev` |
-| `_bifrost.build-01` | `build-01` | `10.0.0.18`, port 2222 | `ci`, from `/srv/build` | `ci` |
+| `node=agent-01` | `agent-01` | `agent-01.infra.example.com`, ssh's port | `ubuntu`, from `~` | `agent`, `dev` |
+| `node=agent-02` | `agent-02` | `10.0.0.12`, ssh's port | `ubuntu`, from `~` | `dev` |
+| `node=build-01` | `build-01` | `10.0.0.18`, port 2222 | `ci`, from `/srv/build` | `ci` |
 
-- **The machine id is the node label**, and the mount lands at `~/machines/<id>`. `id=vm-4711` is only a native
+- **The machine id is the `node=` label**, and the mount lands at `~/machines/<id>`. `id=vm-4711` is only a native
   id, matched by this provider's `include_ids` and `exclude_ids`.
 - **Without `host=`** the node connects to `<node>.<domain>`, so `agent-01` needs an A or AAAA record that your
   system resolver can answer: ssh resolves it when it connects.
@@ -101,15 +99,14 @@ each edit; the `file` plugin reloads the zone within a minute.
 <TabItem label="Cloudflare">
 
 In the `example.com` zone, open **DNS → Records → Add record** once per row. Cloudflare shows names relative to
-the zone, so `_bifrost.infra` is `_bifrost.infra.example.com`.
+the zone, so `_bifrost.infra` is `_bifrost.infra.example.com`. TXT records with the same name form one record set.
 
 | Type | Name | Content | TTL |
 |---|---|---|---|
-| TXT | `_bifrost.infra` | `"v=bf1 nodes=agent-01,agent-02,build-01"` | 5 min |
-| TXT | `_bifrost.agent-01.infra` | `"v=bf1 tags=dev,agent"` | 5 min |
+| TXT | `_bifrost.infra` | `"v=bf1 node=agent-01 tags=dev,agent"` | 5 min |
+| TXT | `_bifrost.infra` | `"v=bf1 node=agent-02 host=10.0.0.12 tags=dev"` | 5 min |
+| TXT | `_bifrost.infra` | `"v=bf1 node=build-01 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"` | 5 min |
 | A | `agent-01.infra` | `10.0.0.11` | 5 min |
-| TXT | `_bifrost.agent-02.infra` | `"v=bf1 host=10.0.0.12 tags=dev"` | 5 min |
-| TXT | `_bifrost.build-01.infra` | `"v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"` | 5 min |
 
 - Type the content with its double quotes. Cloudflare reads them as string delimiters, not as part of the value.
 - Set the A record to **DNS only**. A proxied record resolves to a Cloudflare address, not to your machine.
@@ -117,21 +114,20 @@ the zone, so `_bifrost.infra` is `_bifrost.infra.example.com`.
 </TabItem>
 <TabItem label="Route 53">
 
-Each TXT `Value` is the record inside escaped double quotes (`\"…\"`), the way Route 53 takes TXT strings:
+One record set with three values. Each `Value` is the record inside escaped double quotes (`\"…\"`), the way
+Route 53 takes TXT strings:
 
 ```json title="bifrost-records.json"
 {
   "Changes": [
     { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.infra.example.com", "Type": "TXT", "TTL": 300,
-      "ResourceRecords": [{ "Value": "\"v=bf1 nodes=agent-01,agent-02,build-01\"" }] } },
-    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.agent-01.infra.example.com", "Type": "TXT", "TTL": 300,
-      "ResourceRecords": [{ "Value": "\"v=bf1 tags=dev,agent\"" }] } },
+      "ResourceRecords": [
+        { "Value": "\"v=bf1 node=agent-01 tags=dev,agent\"" },
+        { "Value": "\"v=bf1 node=agent-02 host=10.0.0.12 tags=dev\"" },
+        { "Value": "\"v=bf1 node=build-01 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711\"" }
+      ] } },
     { "Action": "UPSERT", "ResourceRecordSet": { "Name": "agent-01.infra.example.com", "Type": "A", "TTL": 300,
-      "ResourceRecords": [{ "Value": "10.0.0.11" }] } },
-    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.agent-02.infra.example.com", "Type": "TXT", "TTL": 300,
-      "ResourceRecords": [{ "Value": "\"v=bf1 host=10.0.0.12 tags=dev\"" }] } },
-    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.build-01.infra.example.com", "Type": "TXT", "TTL": 300,
-      "ResourceRecords": [{ "Value": "\"v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711\"" }] } }
+      "ResourceRecords": [{ "Value": "10.0.0.11" }] } }
   ]
 }
 ```
@@ -141,23 +137,23 @@ aws route53 change-resource-record-sets --hosted-zone-id Z0123456789EXAMPLE \
   --change-batch file://bifrost-records.json
 ```
 
-`UPSERT` creates or replaces each record set, so running it again is safe.
+`UPSERT` creates or replaces each whole record set, so running it again is safe, and each run must list every
+value: a value you leave out is a machine removed.
 
 </TabItem>
 <TabItem label="dnsmasq">
 
-For a local or lab resolver:
+For a local or lab resolver, one `txt-record=` line per value. Lines with the same name form one record set:
 
 ```text title="/etc/dnsmasq.d/bifrost.conf"
-txt-record=_bifrost.infra.example.com,"v=bf1 nodes=agent-01,agent-02,build-01"
-txt-record=_bifrost.agent-01.infra.example.com,"v=bf1 tags=dev,agent"
-txt-record=_bifrost.agent-02.infra.example.com,"v=bf1 host=10.0.0.12 tags=dev"
-txt-record=_bifrost.build-01.infra.example.com,"v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
+txt-record=_bifrost.infra.example.com,"v=bf1 node=agent-01 tags=dev,agent"
+txt-record=_bifrost.infra.example.com,"v=bf1 node=agent-02 host=10.0.0.12 tags=dev"
+txt-record=_bifrost.infra.example.com,"v=bf1 node=build-01 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
 host-record=agent-01.infra.example.com,10.0.0.11
 ```
 
 Quote every value. Unquoted, dnsmasq splits the value at each comma into separate strings, and bf1 joins strings
-with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=agent-01agent-02`.
+with nothing in between, so `tags=dev,agent` would arrive as `tags=devagent`.
 
 </TabItem>
 </Tabs>
@@ -170,10 +166,12 @@ with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=age
 
    ```console
    $ dig +short TXT _bifrost.infra.example.com
-   "v=bf1 nodes=agent-01,agent-02,build-01"
-   $ dig +short TXT _bifrost.build-01.infra.example.com
-   "v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
+   "v=bf1 node=agent-01 tags=dev,agent"
+   "v=bf1 node=agent-02 host=10.0.0.12 tags=dev"
+   "v=bf1 node=build-01 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
    ```
+
+   The values may come back in any order.
 
 2. Refresh every provider now instead of waiting for the next interval:
 
@@ -208,7 +206,7 @@ with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=age
    ```
 
 4. Answers are cached for their TTL (`$TTL 300` above), so a record you just changed can take that long to show.
-   A node that is listed in the index and still missing after that was skipped. The daemon log says why
+   A machine still missing after that was skipped. The daemon log says why
    ([see below](#what-gets-rejected)):
 
    ```sh
@@ -219,34 +217,34 @@ with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=age
 
 ## Long records
 
-One DNS string holds at most 255 bytes. A longer record is several strings in one TXT record, and bf1 joins them
+One DNS string holds at most 255 bytes. A longer value is several strings in one TXT record, and bf1 joins them
 **with nothing in between**, so keep the separating space inside one of the pieces, here at the end of the first.
-A whole record may be up to 2048 bytes, and each value, the `tags=` list included, up to 256.
+A whole value may be up to 2048 bytes, and each key's value, the `tags=` list included, up to 256.
 
 <Tabs syncKey="dns-host">
 <TabItem label="Zone file">
 
 ```text
-_bifrost.gpu-01     IN TXT ( "v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards "
+_bifrost            IN TXT ( "v=bf1 node=gpu-01 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards "
                              "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821" )
 ```
 
 </TabItem>
 <TabItem label="Cloudflare">
 
-Content, as two quoted strings on one line:
+One more TXT record named `_bifrost.infra`, its content two quoted strings on one line:
 
 ```text
-"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards " "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
+"v=bf1 node=gpu-01 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards " "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
 ```
 
 </TabItem>
 <TabItem label="Route 53">
 
-Both strings go in one `Value`:
+One more `Value` in the `_bifrost` record set, both strings in it:
 
 ```json
-"ResourceRecords": [{ "Value": "\"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards \" \"tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821\"" }]
+{ "Value": "\"v=bf1 node=gpu-01 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards \" \"tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821\"" }
 ```
 
 </TabItem>
@@ -255,7 +253,7 @@ Both strings go in one `Value`:
 Write the value whole. dnsmasq cuts it into 255-byte strings by itself, even mid-word, and bf1 joins them back:
 
 ```text
-txt-record=_bifrost.gpu-01.infra.example.com,"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
+txt-record=_bifrost.infra.example.com,"v=bf1 node=gpu-01 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
 ```
 
 </TabItem>
@@ -264,47 +262,70 @@ txt-record=_bifrost.gpu-01.infra.example.com,"v=bf1 host=gpu-01.datacenter-eu-we
 `dig` shows the pieces:
 
 ```console
-$ dig +short TXT _bifrost.gpu-01.infra.example.com
-"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards " "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
+$ dig +short TXT _bifrost.infra.example.com | grep gpu-01
+"v=bf1 node=gpu-01 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards " "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
 ```
 
-For many nodes, publish several index records instead of one long one. The node list is their union, 256 nodes
-at most:
-
-```text
-_bifrost            IN TXT "v=bf1 nodes=agent-01,agent-02,build-01"
-_bifrost            IN TXT "v=bf1 nodes=gpu-01"
-```
-
-In Route 53 these are two `Value`s in one record set; in Cloudflare, two TXT records with the same name. A node
-is different: it must have exactly one bf1 record, so split a long node record into strings, never into records.
+A machine is exactly one value. Split a long one into strings, never into two values: two different values for
+one node are ambiguous, and the node is skipped.
 
 ## What gets rejected
 
-Each bad record below is skipped on its own. The rest of the zone still counts, and a skipped node is never
-partly applied.
+Each bad value below is skipped on its own. The rest of the record set still counts, and a skipped node is never
+partly applied. The `nodes=` values and `_bifrost.db-01` use the [index form](#large-fleets-index--per-node-records).
 
 ```text
-_bifrost            IN TXT "v=bf1 nodes=dup-01,bad-host,bad-id,twice"
+_bifrost            IN TXT "v=bf1 node=dup-01 host=10.0.0.21 host=10.0.0.22"
+_bifrost            IN TXT "v=bf1 node=bad-host host=-oProxyCommand=touch${IFS}/tmp/pwned"
+_bifrost            IN TXT "v=bf1 node=bad-id host=10.0.0.23 id=../x"
+_bifrost            IN TXT "v=bf1 node=twice host=10.0.0.24"
+_bifrost            IN TXT "v=bf1 node=twice host=10.0.0.25"
+_bifrost            IN TXT "v=bf1 node=both nodes=web-02"
+_bifrost            IN TXT "v=bf1 node=web-01 host=10.0.0.26"
+_bifrost            IN TXT "v=bf1 nodes=web-01,db-01"
 _bifrost            IN TXT "v=bf1 nodes=lab.other"
 
-_bifrost.dup-01     IN TXT "v=bf1 host=10.0.0.21 host=10.0.0.22"
-_bifrost.bad-host   IN TXT "v=bf1 host=-oProxyCommand=touch${IFS}/tmp/pwned"
-_bifrost.bad-id     IN TXT "v=bf1 host=10.0.0.23 id=../x"
-_bifrost.twice      IN TXT "v=bf1 host=10.0.0.24"
-_bifrost.twice      IN TXT "v=bf1 host=10.0.0.25"
+_bifrost.db-01      IN TXT "v=bf1 node=db-01 host=10.0.0.27"
 ```
 
-| Record | Result | Logged reason |
+| Value | Result | Logged reason |
 |---|---|---|
-| `nodes=lab.other` | the whole index record is skipped; the other index records still count | `invalid dns label "lab.other": must match [a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?` |
-| `_bifrost.dup-01` | node skipped | `duplicate key "host"` |
-| `_bifrost.bad-host` | node skipped; ssh never sees the value | `invalid host "-oProxyCommand=touch${IFS}/tmp/pwned": not an IP literal or hostname` |
-| `_bifrost.bad-id` | node skipped | `invalid native id "../x": must match [A-Za-z0-9._:-]{1,128}` |
-| `_bifrost.twice` | node skipped as ambiguous | `ambiguous: 2 distinct bf1 records` |
+| `node=dup-01` | node skipped | `duplicate key "host"` |
+| `node=bad-host` | node skipped; ssh never sees the value | `invalid host "-oProxyCommand=touch${IFS}/tmp/pwned": not an IP literal or hostname` |
+| `node=bad-id` | node skipped | `invalid native id "../x": must match [A-Za-z0-9._:-]{1,128}` |
+| two `node=twice` | node skipped as ambiguous | `ambiguous: 2 distinct bf1 records` |
+| `node=both nodes=web-02` | `both` skipped; `web-02` is never looked up | `node= and nodes= in one value` |
+| `node=web-01`, and `web-01` in `nodes=` | node skipped as ambiguous; never looked up | `ambiguous: inline and in nodes=` |
+| `nodes=lab.other` | that index value is skipped; the other values still count | `invalid dns label "lab.other": must match [a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?` |
+| `_bifrost.db-01` | node skipped: `node=` belongs only in the root record set | `node= in a node record (root values only)` |
 
-If no valid index record is left, the provider reports no machines. The same record published twice is not
-ambiguous.
+If nothing valid is left, the provider reports no machines. The same value published twice, even split into
+strings differently, is not ambiguous.
+
+## Large fleets: index + per-node records
+
+One UDP reply holds 1232 bytes, about 12 to 15 short values. Bifröst retries a truncated answer over TCP, so a
+bigger record set works as long as your DNS server answers on TCP port 53. Use the index form instead when:
+
+- your machines outgrow one UDP reply,
+- a firewall between Bifröst and the server blocks TCP port 53, or
+- each machine publishes its own record, say with a dynamic DNS key scoped to its own name.
+
+An index value lists node labels in `nodes=`. Each listed node has one record of its own at `_bifrost.<node>`, with
+the same keys as an inline value but no `node=`. Both forms mix in one record set:
+
+```text
+_bifrost            IN TXT "v=bf1 node=agent-01 tags=dev,agent"
+_bifrost            IN TXT "v=bf1 node=agent-02 host=10.0.0.12 tags=dev"
+_bifrost            IN TXT "v=bf1 nodes=build-01,gpu-01"
+_bifrost.build-01   IN TXT "v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
+_bifrost.gpu-01     IN TXT "v=bf1 host=10.0.0.40 tags=gpu"
+```
+
+- One index value names about 25 machines, and several index values add up, so with short labels the root record
+  set fits one UDP reply up to about 100 machines. Each indexed machine costs one more query.
+- 256 machines at most, inline and indexed together.
+- A machine is inline or in `nodes=`, never both: that is [ambiguous](#what-gets-rejected), and it is skipped.
 
 ## Split DNS and custom ports
 
@@ -363,7 +384,13 @@ $ bifrost config check
 error: discovery[1].name: duplicate provider name "dns" (a second provider of a type needs a `name`)
 ```
 
-Node labels are machine ids across every zone. If both zones publish `agent-01`, it is one machine, and as DNS
-providers are equally trusted, the one whose name sorts first (`lab`) decides alone. `agent-01` is then
-discover-only, even though `staging` would allow it, and `staging` is listed as shadowed. Give each environment
-its own prefix, such as `stg-web-01` and `lab-pi-01`.
+Node labels are machine ids across every zone. If both zones publish `agent-01`:
+
+```text
+_bifrost.staging.example.com.   IN TXT "v=bf1 node=agent-01 tags=dev"
+_bifrost.lab.example.net.       IN TXT "v=bf1 node=agent-01 host=192.168.1.40"
+```
+
+it is one machine, and as DNS providers are equally trusted, the one whose name sorts first (`lab`) decides
+alone. `agent-01` is then discover-only, even though `staging` would allow it, and `staging` is listed as
+shadowed. Give each environment its own prefix, such as `stg-web-01` and `lab-pi-01`.
