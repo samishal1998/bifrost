@@ -8,16 +8,14 @@
 #              one mounts
 # p13 is the last phase of `all`, so nothing needs the old zone back and it isn't restored.
 
-# p13_zone SERIAL "LABEL|KEY=V ..."... : $T/dns/db with one node record per argument and the index listing them all
-# (tmp + mv, 644: coredns runs nonroot and reloads on a higher serial)
+# p13_zone SERIAL "LABEL|KEY=V ..."... : $T/dns/db with one inline node record (node=LABEL) per argument in the
+# root RRset, as p08 publishes its machines (tmp + mv, 644: coredns runs nonroot and reloads on a higher serial)
 p13_zone() {
-  local serial=$1 r nodes=()
+  local serial=$1 r
   shift
-  for r; do nodes+=("${r%%|*}"); done
   {
     printf '$ORIGIN test.bifrost.\n$TTL 5\n@ IN SOA ns admin %s 60 60 3600 5\n@ IN NS ns\nns IN A 127.0.0.1\n' "$serial"
-    printf '_bifrost IN TXT "v=bf1 nodes=%s"\n' "$(IFS=,; echo "${nodes[*]}")"
-    for r; do printf '_bifrost.%s IN TXT "v=bf1 %s"\n' "${r%%|*}" "${r#*|}"; done
+    for r; do printf '_bifrost IN TXT "v=bf1 node=%s %s"\n' "${r%%|*}" "${r#*|}"; done
   } >"$T/dns/db.tmp"
   chmod 644 "$T/dns/db.tmp" && mv "$T/dns/db.tmp" "$T/dns/db"
 }
@@ -68,7 +66,7 @@ check_p13() {
   t0=$SECONDS
   p13_zone 6 "$renamed" "$dup"
   ok "p13: serial 6 served (agent-dns → agent-dns2)" wait_until 10 p13_serial 6
-  # the first refresh listing agent-dns2 is the first without agent-dns (one index): ~6s of its 9s floor remain
+  # the first refresh listing agent-dns2 is the first without agent-dns (one root RRset): ~6s of its 9s floor remain
   ok "p13: rename: agent-dns2 discovered within 20s" wait_until 20 p13_count machines '.id == "agent-dns2"' 1
   ok "p13: rename: agent-dns still mounted once agent-dns2 is listed (removal hysteresis)" state_is agent-dns mounted
   ok "p13: rename: old agent-dns unmounted and removed within 25s" wait_until 25 gone "$mp"
