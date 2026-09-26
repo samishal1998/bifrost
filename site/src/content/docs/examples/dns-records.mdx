@@ -1,0 +1,369 @@
+---
+title: DNS records
+description: A complete bf1 zone, the same records in Cloudflare, Route 53, dnsmasq and CoreDNS, and how to check what Bifröst sees.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Copy-paste examples for the [DNS TXT provider](/bifrost/guides/discovery/#dns-txt-bf1). They all publish the same
+three machines under `infra.example.com`: one index record lists the node labels, and each node has one record
+of its own.
+
+## A complete zone
+
+A standard zone file, as BIND or CoreDNS load it:
+
+```text title="db.infra.example.com"
+$ORIGIN infra.example.com.
+$TTL 300
+@                   IN SOA ns1 hostmaster 2026092601 3600 600 604800 300
+@                   IN NS  ns1
+ns1                 IN A   10.0.0.2
+
+; the index: every node label, comma-separated, no spaces
+_bifrost            IN TXT "v=bf1 nodes=agent-01,agent-02,build-01"
+
+; defaults: no host=, so bifrost connects to agent-01.infra.example.com
+_bifrost.agent-01   IN TXT "v=bf1 tags=dev,agent"
+agent-01            IN A   10.0.0.11
+
+; an explicit address
+_bifrost.agent-02   IN TXT "v=bf1 host=10.0.0.12 tags=dev"
+
+; every key
+_bifrost.build-01   IN TXT "v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
+```
+
+<Aside type="caution">
+Anyone can read the TXT records of a public zone. For internal addresses, publish them in a private zone or on an
+internal server and point Bifröst at it with [`nameservers`](#split-dns-and-custom-ports).
+</Aside>
+
+## How each record becomes a machine
+
+With this provider in your config:
+
+```toml
+[[discovery]]
+type = "dns"
+name = "infra"
+domain = "infra.example.com"
+
+[discovery.filter]
+include_names = ["agent-*", "build-*"]
+
+[discovery.mount]
+user = "ubuntu"
+honor_hints = true
+```
+
+| Node record | Machine id | Connects to | Mounts as | Tags |
+|---|---|---|---|---|
+| `_bifrost.agent-01` | `agent-01` | `agent-01.infra.example.com`, ssh's port | `ubuntu`, from `~` | `agent`, `dev` |
+| `_bifrost.agent-02` | `agent-02` | `10.0.0.12`, ssh's port | `ubuntu`, from `~` | `dev` |
+| `_bifrost.build-01` | `build-01` | `10.0.0.18`, port 2222 | `ci`, from `/srv/build` | `ci` |
+
+- **The machine id is the node label**, and the mount lands at `~/machines/<id>`. `id=vm-4711` is only a native
+  id, matched by this provider's `include_ids` and `exclude_ids`.
+- **Without `host=`** the node connects to `<node>.<domain>`, so `agent-01` needs its own A or AAAA record. ssh
+  resolves it when it connects.
+- **`host=` and `port=` are always used.** `user=` and `path=` are hints: with `honor_hints = false`, `build-01`
+  mounts as `ubuntu` from `~`, still on port 2222.
+
+## Publish the records
+
+<Tabs syncKey="dns-host">
+<TabItem label="Zone file">
+
+Serve [the zone above](#a-complete-zone) from CoreDNS with the `file` plugin:
+
+```text title="Corefile"
+infra.example.com:53 {
+    file /etc/coredns/db.infra.example.com
+}
+.:53 {
+    forward . /etc/resolv.conf
+}
+```
+
+To try it on your own machine, run it in Docker on port 5353 and set
+[`nameservers = ["127.0.0.1:5353"]`](#split-dns-and-custom-ports):
+
+```sh
+docker run -d --name coredns -p 127.0.0.1:5353:53/udp -p 127.0.0.1:5353:53/tcp \
+  -v "$PWD:/etc/coredns:ro" coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
+```
+
+The image runs as a non-root user, so the directory and files must be world-readable. Bump the SOA serial after
+each edit; the `file` plugin reloads the zone within a minute.
+
+</TabItem>
+<TabItem label="Cloudflare">
+
+In the `example.com` zone, open **DNS → Records → Add record** once per row. Cloudflare shows names relative to
+the zone, so `_bifrost.infra` is `_bifrost.infra.example.com`.
+
+| Type | Name | Content | TTL |
+|---|---|---|---|
+| TXT | `_bifrost.infra` | `"v=bf1 nodes=agent-01,agent-02,build-01"` | 5 min |
+| TXT | `_bifrost.agent-01.infra` | `"v=bf1 tags=dev,agent"` | 5 min |
+| A | `agent-01.infra` | `10.0.0.11` | 5 min |
+| TXT | `_bifrost.agent-02.infra` | `"v=bf1 host=10.0.0.12 tags=dev"` | 5 min |
+| TXT | `_bifrost.build-01.infra` | `"v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"` | 5 min |
+
+- Type the content with its double quotes. Cloudflare reads them as string delimiters, not as part of the value.
+- Set the A record to **DNS only**. A proxied record resolves to a Cloudflare address, not to your machine.
+
+</TabItem>
+<TabItem label="Route 53">
+
+Each TXT `Value` is the record inside escaped double quotes (`\"…\"`), the way Route 53 takes TXT strings:
+
+```json title="bifrost-records.json"
+{
+  "Changes": [
+    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.infra.example.com", "Type": "TXT", "TTL": 300,
+      "ResourceRecords": [{ "Value": "\"v=bf1 nodes=agent-01,agent-02,build-01\"" }] } },
+    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.agent-01.infra.example.com", "Type": "TXT", "TTL": 300,
+      "ResourceRecords": [{ "Value": "\"v=bf1 tags=dev,agent\"" }] } },
+    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "agent-01.infra.example.com", "Type": "A", "TTL": 300,
+      "ResourceRecords": [{ "Value": "10.0.0.11" }] } },
+    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.agent-02.infra.example.com", "Type": "TXT", "TTL": 300,
+      "ResourceRecords": [{ "Value": "\"v=bf1 host=10.0.0.12 tags=dev\"" }] } },
+    { "Action": "UPSERT", "ResourceRecordSet": { "Name": "_bifrost.build-01.infra.example.com", "Type": "TXT", "TTL": 300,
+      "ResourceRecords": [{ "Value": "\"v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711\"" }] } }
+  ]
+}
+```
+
+```sh
+aws route53 change-resource-record-sets --hosted-zone-id Z0123456789EXAMPLE \
+  --change-batch file://bifrost-records.json
+```
+
+`UPSERT` creates or replaces each record set, so running it again is safe.
+
+</TabItem>
+<TabItem label="dnsmasq">
+
+For a local or lab resolver:
+
+```text title="/etc/dnsmasq.d/bifrost.conf"
+txt-record=_bifrost.infra.example.com,"v=bf1 nodes=agent-01,agent-02,build-01"
+txt-record=_bifrost.agent-01.infra.example.com,"v=bf1 tags=dev,agent"
+txt-record=_bifrost.agent-02.infra.example.com,"v=bf1 host=10.0.0.12 tags=dev"
+txt-record=_bifrost.build-01.infra.example.com,"v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
+host-record=agent-01.infra.example.com,10.0.0.11
+```
+
+Quote every value. Unquoted, dnsmasq splits the value at each comma into separate strings, and bf1 joins strings
+with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=agent-01agent-02`.
+
+</TabItem>
+</Tabs>
+
+## Check what Bifröst sees
+
+<Steps>
+
+1. Ask DNS directly. Add `@10.0.0.2`, or `@127.0.0.1 -p 5353`, to ask one server:
+
+   ```console
+   $ dig +short TXT _bifrost.infra.example.com
+   "v=bf1 nodes=agent-01,agent-02,build-01"
+   $ dig +short TXT _bifrost.build-01.infra.example.com
+   "v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/build tags=ci id=vm-4711"
+   ```
+
+2. Refresh every provider now instead of waiting for the next interval:
+
+   ```console
+   $ bifrost discover
+   PROVIDER  KIND    STATUS  MACHINES  LAST-OK
+   static    static  ok      0         -
+   infra     dns     ok      3         0s ago
+   ```
+
+3. List the machines, then look at one:
+
+   ```console
+   $ bifrost machines
+   NAME      SOURCE  ADDRESS                     STATE    MOUNTED
+   agent-01  infra   agent-01.infra.example.com  mounted  yes
+   agent-02  infra   10.0.0.12                   mounted  yes
+   build-01  infra   10.0.0.18                   mounted  yes
+
+   $ bifrost machines show build-01
+   id        build-01
+   name      build-01
+   source    infra
+   verdict   allowed (infra.filter.include)
+   address   10.0.0.18:2222
+   online    unknown
+   state     mounted
+   tags      ci
+   metadata  -
+   shadowed  -
+   mounts    build-01
+   ```
+
+4. A node that is missing was skipped. The daemon log says why ([see below](#what-gets-rejected)):
+
+   ```sh
+   journalctl --user -u bifrost | grep bf1
+   ```
+
+</Steps>
+
+## Long records
+
+One DNS string holds at most 255 bytes. A longer record is several strings in one TXT record, and bf1 joins them
+**with nothing in between**, so keep the separating space inside one of the pieces, here at the end of the first.
+A whole record may be up to 2048 bytes.
+
+<Tabs syncKey="dns-host">
+<TabItem label="Zone file">
+
+```text
+_bifrost.gpu-01     IN TXT ( "v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards "
+                             "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821" )
+```
+
+</TabItem>
+<TabItem label="Cloudflare">
+
+Content, as two quoted strings on one line:
+
+```text
+"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards " "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
+```
+
+</TabItem>
+<TabItem label="Route 53">
+
+Both strings go in one `Value`:
+
+```json
+"ResourceRecords": [{ "Value": "\"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards \" \"tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821\"" }]
+```
+
+</TabItem>
+<TabItem label="dnsmasq">
+
+Write the value whole. dnsmasq cuts it into 255-byte strings by itself, even mid-word, and bf1 joins them back:
+
+```text
+txt-record=_bifrost.gpu-01.infra.example.com,"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
+```
+
+</TabItem>
+</Tabs>
+
+`dig` shows the pieces:
+
+```console
+$ dig +short TXT _bifrost.gpu-01.infra.example.com
+"v=bf1 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards " "tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821"
+```
+
+For many nodes, publish several index records instead of one long one. The node list is their union, 256 nodes
+at most:
+
+```text
+_bifrost            IN TXT "v=bf1 nodes=agent-01,agent-02,build-01"
+_bifrost            IN TXT "v=bf1 nodes=gpu-01"
+```
+
+In Route 53 these are two `Value`s in one record set; in Cloudflare, two TXT records with the same name. A node
+is different: it must have exactly one bf1 record, so split a long node record into strings, never into records.
+
+## What gets rejected
+
+Each bad record below is skipped on its own. The rest of the zone still counts, and a skipped node is never
+partly applied.
+
+```text
+_bifrost            IN TXT "v=bf1 nodes=dup-01,bad-host,bad-id,twice"
+_bifrost            IN TXT "v=bf1 nodes=lab.other"
+
+_bifrost.dup-01     IN TXT "v=bf1 host=10.0.0.21 host=10.0.0.22"
+_bifrost.bad-host   IN TXT "v=bf1 host=-oProxyCommand=touch${IFS}/tmp/pwned"
+_bifrost.bad-id     IN TXT "v=bf1 host=10.0.0.23 id=../x"
+_bifrost.twice      IN TXT "v=bf1 host=10.0.0.24"
+_bifrost.twice      IN TXT "v=bf1 host=10.0.0.25"
+```
+
+| Record | Result | Logged reason |
+|---|---|---|
+| `nodes=lab.other` | the whole index record is skipped; the other index records still count | `invalid dns label "lab.other": must match [a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?` |
+| `_bifrost.dup-01` | node skipped | `duplicate key "host"` |
+| `_bifrost.bad-host` | node skipped; ssh never sees the value | `invalid host "-oProxyCommand=touch${IFS}/tmp/pwned": not an IP literal or hostname` |
+| `_bifrost.bad-id` | node skipped | `invalid native id "../x": must match [A-Za-z0-9._:-]{1,128}` |
+| `_bifrost.twice` | node skipped as ambiguous | `ambiguous: 2 distinct bf1 records` |
+
+If no valid index record is left, the provider reports no machines. The same record published twice is not
+ambiguous. In the log, a skip looks like this:
+
+```text
+WARN discovery{provider=infra kind=dns}: bifrost_discovery::dns: bf1 index record skipped provider="infra" record="_bifrost.infra.example.com." reason="invalid dns label \"lab.other\": must match [a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+WARN discovery{provider=infra kind=dns}: bifrost_discovery::dns: bf1 node skipped provider="infra" record="_bifrost.dup-01.infra.example.com." reason="duplicate key \"host\""
+```
+
+## Split DNS and custom ports
+
+When the zone lives on an internal server that your system resolver doesn't ask, name the server:
+
+```toml
+[[discovery]]
+type = "dns"
+name = "infra"
+domain = "infra.example.com"
+nameservers = ["10.0.0.2"]            # port 53
+# nameservers = ["127.0.0.1:5353"]    # a lab resolver on another port
+```
+
+- Bifröst then asks only these servers, over UDP and TCP, and caches each answer for its TTL.
+- Check against the same server: `dig @10.0.0.2 +short TXT _bifrost.infra.example.com`.
+- Without `nameservers`, Bifröst uses the system resolver and re-reads its config on every refresh.
+
+## Several environments
+
+Two zones, two providers:
+
+```toml
+[[discovery]]
+type = "dns"
+name = "staging"
+domain = "staging.example.com"
+
+[discovery.filter]
+include_tags = ["dev"]
+
+[discovery.mount]
+user = "deploy"
+
+[[discovery]]
+type = "dns"
+name = "lab"
+domain = "lab.example.net"
+nameservers = ["192.168.1.53"]
+
+[discovery.filter]
+include_names = ["lab-*"]
+
+[discovery.mount]
+read_only = true
+```
+
+A second provider of a type needs its own `name`, which then shows in verdicts
+(`allowed (staging.filter.include)`), in `bifrost discover` and in the SOURCE column. Without one:
+
+```console
+$ bifrost config check
+error: discovery[1].name: duplicate provider name "dns" (a second provider of a type needs a `name`)
+```
+
+Node labels are machine ids across every zone. If both zones publish `agent-01`, it is one machine, and as DNS
+providers are equally trusted, the one whose name sorts first (`lab`) decides alone. `agent-01` is then
+discover-only, even though `staging` would allow it, and `staging` is listed as shadowed. Give each environment
+its own prefix, such as `stg-web-01` and `lab-pi-01`.

@@ -1,0 +1,281 @@
+---
+title: Discovery examples
+description: Ready-made configs for static machines, Tailscale and an HTTP inventory, and one that combines providers.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Every snippet is a complete config file: try it with `bifrost config check <file>`. For DNS, see
+[DNS records](/bifrost/examples/dns-records/).
+
+## Static machines
+
+A machine with one mount (the short form), and a machine with two mounts, one of them read-only through rclone.
+Both listen for SSH on port 2222:
+
+```toml
+[[machines]]
+name = "nas"
+host = "192.168.1.20"
+port = 2222
+user = "admin"
+remote = "/volume1/share"
+read_only = true
+
+[[machines]]
+name = "build"
+host = "build.lan"
+port = 2222
+user = "ci"
+tags = ["ci"]
+
+[[machines.mounts]]
+remote = "~"
+local = "build"
+
+[[machines.mounts]]
+remote = "/srv/artifacts"
+local = "build-artifacts"
+driver = "rclone"
+read_only = true
+```
+
+```console
+$ bifrost config check
+ok: /home/sami/.config/bifrost/config.toml (2 machines, 0 providers, 3 mounts, root /home/sami/machines)
+```
+
+That is `~/machines/nas`, `~/machines/build` and `~/machines/build-artifacts`. A machine's `port` and `user` apply
+to all its mounts. Static machines are allowed unless a `[policy.deny]` rule matches.
+
+## Tailscale
+
+### Tags, excluded names and a mount template
+
+```toml
+[[discovery]]
+type = "tailscale"
+
+[discovery.filter]
+include_tags = ["dev", "agent"]          # ACL tags tag:dev and tag:agent
+exclude_names = ["*-old", "laptop-*"]
+
+[discovery.mount]
+user = "sami"
+remote = "/srv/work"
+read_only = true
+```
+
+| Peer | Tags | Verdict |
+|---|---|---|
+| `devbox` | `tag:dev` | `allowed (tailscale.filter.include)` |
+| `agent-03` | `tag:agent` | `allowed (tailscale.filter.include)` |
+| `devbox-old` | `tag:dev` | `denied (tailscale.filter.exclude names=*-old)` |
+| `laptop-sami` | `tag:dev` | `denied (tailscale.filter.exclude names=laptop-*)` |
+| `gpu-box` | none | `discover-only` |
+
+The allowed peers mount read-only, as `sami`, from `/srv/work`.
+
+### Tag your machines
+
+Tags are defined in your tailnet policy file. Let admins apply them:
+
+```jsonc title="Tailnet policy file (excerpt)"
+"tagOwners": {
+  "tag:dev":   ["autogroup:admin"],
+  "tag:agent": ["autogroup:admin"],
+},
+```
+
+Then tag each machine in the admin console (**Machines → ⋯ → Edit ACL tags**), or when it joins with
+`sudo tailscale up --advertise-tags=tag:dev`. Bifröst only reads `tailscale status`; it never changes tags.
+
+### Exactly one machine, by node ID
+
+A node ID stays the same when the machine is renamed. Look it up:
+
+```console
+$ tailscale status --json | jq -r '.Peer[] | select(.HostName == "gpu-box") | .ID'
+nQ2mX7Yr4R11CNTRL
+```
+
+```toml
+[[discovery]]
+type = "tailscale"
+
+[discovery.filter]
+include_ids = ["nQ2mX7Yr4R11CNTRL"]
+```
+
+Only `gpu-box` is allowed; every other peer is discover-only.
+
+<Aside type="caution" title="Include rules AND together">
+Adding `include_tags = ["dev"]` to that filter would allow only a machine with that ID **and** the tag. To allow
+one more machine next to a tag rule, use a global allow scoped to the provider. Global `ids` match the machine id
+(`gpu-box`), never a node ID:
+
+```toml
+[[discovery]]
+type = "tailscale"
+
+[discovery.filter]
+include_tags = ["dev"]
+
+[policy.allow]
+ids = ["gpu-box"]
+providers = ["tailscale"]
+```
+
+`gpu-box` is then `allowed (policy.allow)`.
+</Aside>
+
+## HTTP inventory
+
+### A file served on your machine
+
+<Steps>
+
+1. Write the document:
+
+   ```json title="~/inventory/machines.json"
+   {
+     "machines": [
+       { "name": "web-01", "host": "10.20.0.4", "user": "deploy", "metadata": { "tags": ["dev"], "env": "dev" } },
+       { "name": "web-02", "addresses": ["10.20.0.5"], "port": 2222, "metadata": { "tags": ["dev"] } }
+     ]
+   }
+   ```
+
+2. Serve it on the loopback address only:
+
+   ```sh
+   python3 -m http.server 8765 --bind 127.0.0.1 --directory ~/inventory
+   ```
+
+3. Point Bifröst at it. Plain `http://` is accepted only for `127.0.0.1`, `[::1]` and `localhost`:
+
+   ```toml
+   [[discovery]]
+   type = "http"
+   name = "inventory"
+   url = "http://127.0.0.1:8765/machines.json"
+
+   [discovery.filter]
+   include_tags = ["dev"]
+   ```
+
+</Steps>
+
+Both machines are tagged `dev`, so both are allowed. `web-01` connects to `10.20.0.4`. `web-02` has no `host`, so
+it uses its first address, on port 2222. `user` is a hint, used only with `honor_hints = true`. Plain `http://` to
+any other address fails the check:
+
+```console
+$ bifrost config check
+error: discovery[0].url: must be https://, or http:// only to 127.0.0.1, [::1] or localhost
+```
+
+### An authenticated endpoint
+
+```toml
+[[discovery]]
+type = "http"
+name = "inventory"
+url = "https://inventory.example.com/bifrost/v1/machines"
+headers = { Authorization = "Bearer ${BIFROST_INVENTORY_TOKEN}" }
+interval = "60s"
+```
+
+The token comes from the environment, for `bifrost config check` as for the daemon. An unset variable is an error,
+never an empty header:
+
+```console
+$ bifrost config check
+error: discovery[0].headers."Authorization": undefined variable $BIFROST_INVENTORY_TOKEN
+```
+
+Under systemd, keep the token in a file only you can read, and load it into the unit:
+
+```ini title="~/.config/systemd/user/bifrost.service.d/inventory.conf"
+[Service]
+EnvironmentFile=%h/.config/bifrost/inventory.env
+```
+
+```sh
+(umask 077; printf 'BIFROST_INVENTORY_TOKEN=%s\n' "$TOKEN" > ~/.config/bifrost/inventory.env)
+systemctl --user daemon-reload && systemctl --user restart bifrost
+```
+
+### Generate the document from a list
+
+```text title="hosts.txt"
+agent-01 10.20.0.4 dev,agent
+agent-02 10.20.0.5 dev
+build-01 10.20.0.18 ci
+```
+
+```sh
+jq -Rn '{machines: [inputs | select(length > 0) | split(" ")
+  | {name: .[0], host: .[1], metadata: {tags: (.[2] | split(","))}}]}' hosts.txt > ~/inventory/machines.json
+```
+
+Each line becomes `{"name": "agent-01", "host": "10.20.0.4", "metadata": {"tags": ["dev", "agent"]}}`. Rerun it
+whenever the list changes; the next refresh picks the file up.
+
+## All together
+
+Static, Tailscale and DNS in one file, with a global deny:
+
+```toml
+[policy.deny]
+names = ["*-old"]
+tags = ["prod"]
+
+[[machines]]
+name = "build"
+host = "10.0.0.18"
+user = "ci"
+remote = "/srv/build"
+
+[[discovery]]
+type = "tailscale"
+
+[discovery.filter]
+include_tags = ["dev"]
+exclude_names = ["agent-02"]    # handed to DNS
+
+[discovery.mount]
+user = "sami"
+
+[[discovery]]
+type = "dns"
+name = "infra"
+domain = "infra.example.com"
+
+[discovery.filter]
+include_names = ["agent-*", "db-*"]
+
+[discovery.mount]
+user = "ubuntu"
+```
+
+With these DNS records:
+
+```text
+_bifrost            IN TXT "v=bf1 nodes=agent-01,agent-02,db-01"
+_bifrost.agent-01   IN TXT "v=bf1 host=10.0.0.11"
+_bifrost.agent-02   IN TXT "v=bf1 host=10.0.0.12"
+_bifrost.db-01      IN TXT "v=bf1 host=10.0.0.30 tags=prod"
+```
+
+| Machine | Reported by | Verdict | Why |
+|---|---|---|---|
+| `build` | static | `allowed (static)` | static machines are allowed unless denied |
+| `devbox` | Tailscale, `tag:dev` | `allowed (tailscale.filter.include)` | |
+| `devbox-old` | Tailscale, `tag:dev` | `denied (policy.deny names=*-old)` | a global deny beats every allow |
+| `laptop` | Tailscale, no tags | `discover-only` | no rule allows it |
+| `agent-01` | Tailscale, no tags; `infra` | `discover-only` | Tailscale is more trusted, so its report alone decides. `infra` is listed as shadowed |
+| `agent-02` | Tailscale, `tag:dev`; `infra` | `allowed (infra.filter.include)` | the exclude drops Tailscale's report, so DNS decides and supplies `10.0.0.12` |
+| `db-01` | `infra`, `tags=prod` | `denied (policy.deny tags=prod)` | |
+
+See [Policy and filtering](/bifrost/guides/policy/) for the rules behind each verdict.

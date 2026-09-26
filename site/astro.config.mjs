@@ -35,6 +35,7 @@ export default defineConfig({
 						'guides/troubleshooting',
 					],
 				},
+				{ label: 'Examples', items: ['examples/discovery', 'examples/dns-records'] },
 				{
 					label: 'Reference',
 					items: [

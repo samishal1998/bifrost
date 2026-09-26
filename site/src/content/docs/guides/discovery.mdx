@@ -43,7 +43,8 @@ tailscale  tailscale  ok      5         12s ago
 ## Static
 
 Machines in `[[machines]]` are reported by a built-in provider named `static`. They are the most trusted source
-and are allowed unless a global deny matches. See [Configuration](/bifrost/guides/configuration/#static-machines).
+and are allowed unless a global deny matches. See [Configuration](/bifrost/guides/configuration/#static-machines)
+and the [examples](/bifrost/examples/discovery/#static-machines).
 
 ## Tailscale
 
@@ -67,6 +68,8 @@ user = "sami"
 - Your own node is never listed, and neither are other users' devices that appear only because you shared this
   machine with them (`tailscale status` hides them too).
 - With no filter and no global allow, every peer is discover-only.
+
+Examples: [tags and a mount template, one machine by node ID, tagging machines](/bifrost/examples/discovery/#tailscale).
 
 ## DNS TXT (`bf1`)
 
@@ -92,6 +95,9 @@ _bifrost.infra.example.com.          TXT "v=bf1 nodes=agent-01,agent-02"
 _bifrost.agent-01.infra.example.com. TXT "v=bf1 host=10.0.0.5 port=22 user=sami tags=dev,agent path=/home/sami"
 _bifrost.agent-02.infra.example.com. TXT "v=bf1 tags=dev"
 ```
+
+A complete zone, the same records in Cloudflare, Route 53, dnsmasq and CoreDNS, and how to check them:
+[DNS records](/bifrost/examples/dns-records/).
 
 ### Record format
 
@@ -134,7 +140,8 @@ include_metadata = { env = "dev" }
 ```
 
 Bifröst sends `GET url` with your headers and `Accept: application/json`. Header values may use `${VAR}`, so
-secrets stay in the environment; they are never logged.
+secrets stay in the environment; they are never logged. Examples: [a local file, an authenticated endpoint,
+generating the document with jq](/bifrost/examples/discovery/#http-inventory).
 
 ### Response schema
 
