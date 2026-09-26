@@ -529,8 +529,8 @@ pub fn decide(
         (Phase::Mounted, Some(c)) => {
             let changed =
                 (rt.handle.as_ref()).is_some_and(|h| h.fingerprint != c.spec.fingerprint());
-            // A16: never drop a working mount for a spec that can't mount now
-            let can_remount = c.driver.is_ok() && c.online != Some(false);
+            // A16: never drop a working mount for a spec that can't mount now; r3-5: nor for a partial pre-ready view
+            let can_remount = c.driver.is_ok() && c.online != Some(false) && ready;
             let past_grace =
                 (rt.degraded_since).is_some_and(|t| now.saturating_duration_since(t) >= grace);
             match &rt.health {
@@ -548,11 +548,11 @@ pub fn decide(
                 }), // 12
                 Health::Degraded(r) => Degraded(r.clone()), // 13: sshfs reconnect is handling it
                 _ if changed => {
-                    let why = c
-                        .driver
-                        .as_ref()
-                        .err()
-                        .map_or("machine offline", String::as_str);
+                    let why = match &c.driver {
+                        Err(e) => e.as_str(),
+                        Ok(_) if c.online == Some(false) => "machine offline",
+                        Ok(_) => "warming up",
+                    };
                     Degraded(format!("change pending: {why}")) // 13 (A16)
                 }
                 _ => NoOp, // 14: Healthy, Unknown, or offline-but-Healthy
@@ -1250,6 +1250,11 @@ mod tests {
         assert_eq!(
             dec(Some(&offline), &healthy, now),
             Action::Degraded("change pending: machine offline".into())
+        );
+        // r3-5: before ready a partial discovery view (lower-trust provider first) must not remount an adopted mount
+        assert_eq!(
+            decide(Some(&moved("a")), &healthy, now, false, GRACE),
+            Action::Degraded("change pending: warming up".into())
         );
         // a Degraded mount with the gate closed shows its own reason, and still reaches row 12 after grace
         let rt = degraded(&cand("a"), now);
