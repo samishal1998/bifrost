@@ -7,6 +7,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"            # File::try_lock
 license = "MIT OR Apache-2.0"
+description = "Remote worlds. Local files. A daemon that keeps remote machines mounted as local folders over SSHFS or rclone."
+repository = "https://github.com/samishal1998/bifrost"
+homepage = "https://samishal1998.github.io/bifrost/"
+readme = "README.md"
+keywords = ["sshfs", "rclone", "mount", "tailscale", "ssh"]
+categories = ["command-line-utilities", "filesystem"]
 
 [workspace.dependencies]
 bifrost-core      = { path = "crates/bifrost-core" }
