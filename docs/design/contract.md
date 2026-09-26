@@ -1140,8 +1140,9 @@ pub mod dns {
     pub struct DnsProvider;
     impl DnsProvider { pub fn new(name: String, domain: Host, nameservers: Vec<SocketAddr>) -> Result<Self, String>; }
     #[derive(Clone, Debug, PartialEq, Eq, Default)]
-    pub struct Bf1 { pub nodes: Vec<String>, pub host: Option<Host>, pub port: Option<u16>, pub user: Option<User>,
-                     pub tags: Vec<String>, pub path: Option<RemotePath>, pub id: Option<String> }   // no driver (E2)
+    pub struct Bf1 { pub node: Option<String>, pub nodes: Vec<String>, pub host: Option<Host>, pub port: Option<u16>,
+                     pub user: Option<User>, pub tags: Vec<String>, pub path: Option<RemotePath>,
+                     pub id: Option<String> }   // no driver (E2); node = root values only (inline node record)
     /// ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ (no dots). Lives here, not in core (B8).
     pub fn dns_label(s: &str) -> Result<String, Invalid>;
     pub fn parse_bf1(txt: &str) -> Result<Option<Bf1>, String>;   // Ok(None) = not a bf1 record (ignore silently)
@@ -1211,19 +1212,30 @@ The system config is never snapshotted: a snapshot keeps querying the old server
 
 All queries are absolute names ending in `.`, so resolv.conf search domains never apply.
 
+Big answers: every server gets UDP and TCP (`udp_and_tcp` above; hickory's system config builds the same for each resolv.conf or SCDynamicStore server). A truncated UDP answer (TC) is retried over TCP. Explicit nameservers, and the macOS/Windows system config, send EDNS with hickory's default 1232-byte payload, so a root RRset of more than about 12–15 inline values outgrows the UDP reply. On Linux the system path sends EDNS only when resolv.conf has `options edns0`; otherwise the classic 512-byte limit applies and truncation starts at about 5 inline values. A big root RRset therefore needs a nameserver that answers over TCP: when TCP fails the lookup fails (`Failed`, freeze), never a partial view. No resolver option is set for this (D1 stands).
+
+Records. The root `_bifrost.<domain>.` holds inline node records (`node=`) and index values (`nodes=`), mixed freely; an index node publishes its own record:
+```
+_bifrost.infra.example.com.          300 IN TXT "v=bf1 node=agent-01 host=10.0.0.5 user=sami tags=dev,agent"
+_bifrost.infra.example.com.          300 IN TXT "v=bf1 node=agent-02 tags=dev"
+_bifrost.infra.example.com.          300 IN TXT "v=bf1 nodes=agent-03"
+_bifrost.agent-03.infra.example.com. 300 IN TXT "v=bf1 host=10.0.0.7 tags=dev"
+```
+
 ```
 S       := concat(all character-strings of one TXT RR)      ; UTF-8 ASCII, ≤ 2048 bytes
 record  := token *(1*SP token)
 token   := key "=" value                                     ; split at the first '='
 key     := 1*32 [a-z0-9_-]      value := 1*256 (%x21-7E except '"')
 first token != "v=bf1"  → Ok(None): not ours (SPF, future v=bf2) — ignored silently
-missing '=', empty value, over-long key or value, duplicate key → Err (record invalid)
-unknown keys → ignored (including `driver=`, E2).  Known: v nodes host port user tags path id
+missing '=', empty value, over-long key or value, duplicate key, node= with nodes= → Err (record invalid)
+unknown keys → ignored (including `driver=`, E2).  Known: v node nodes host port user tags path id
 ```
 
 | key | validation | goes to |
 |---|---|---|
-| nodes | comma list of `dns_label` (this module, B8; no dots, so an index can't make us query another domain); ≤256 in total across all index RRs; deduplicated | index |
+| node | `dns_label`. **Root values only**: marks an inline node record whose identity is the label. Not with `nodes=` in one value. In a node record it rejects that node (stricter than ignoring it) | identity (the node label) |
+| nodes | comma list of `dns_label` (this module, B8; no dots, so an index can't make us query another domain); deduplicated; ≤256 labels in total across the root RRset, inline `node=` values included | index |
 | host | `Host::parse` (rejects `-oProxyCommand=…`); default `<node>.<domain>` | `addresses[0]` |
 | port | 1..=65535, ≤5 digits | port |
 | user / path | `User::parse` / `RemotePath::parse` | hints |
@@ -1231,16 +1243,19 @@ unknown keys → ignored (including `driver=`, E2).  Known: v nodes host port us
 | id | `native_id()`, so `../../etc` is rejected | native_id only; **identity is always the node label** |
 
 Algorithm:
-1. Look up `_bifrost.<domain>.`.
-   - `is_no_records_found()`, or no valid bf1 index RR → `Ok(vec![])` plus a warning. With the expiry registry this causes no churn; entries age out after `3 × interval`. An empty Ok does not count toward warm-up `ready` (A18).
+1. Look up the root `_bifrost.<domain>.`.
+   - `is_no_records_found()`, or no index node and no valid inline node → `Ok(vec![])` plus a warning. With the expiry registry this causes no churn; entries age out after `3 × interval`. An empty Ok does not count toward warm-up `ready` (A18).
    - Any other error → `Err(Failed)`, which freezes the provider.
-2. Nodes = the union of `nodes=` over the valid index RRs. Inline index records (`host=` at the root) are not supported (§15).
-3. Look up every `_bifrost.<node>.<domain>.` concurrently with a `JoinSet`. For each node:
+2. Split the root values. A `v=bf1` value with a `node=` token is an inline node record, grouped by that label **before** parsing, so an invalid one still rejects its node. Any other bf1 value is an index value; an invalid one is skipped with a warning. Labels = the sorted union of the inline labels and `nodes=` over the valid index values, at most 256 (the rest ignored with a warning).
+   - An inline node takes step 3's rules over its root values (zero, ambiguous, any invalid key → skip the whole node; identical duplicates are fine) and is never looked up at `_bifrost.<node>.<domain>.`.
+   - A label both inline and in `nodes=` → skip as "ambiguous", not looked up (fail-safe, like two distinct node records).
+3. Look up every index node's `_bifrost.<node>.<domain>.` concurrently with a `JoinSet`. For each node:
    - a lookup error → skip the node; its old observation is not refreshed and ages out;
    - zero bf1 RRs → skip;
    - more than one **distinct** valid bf1 RR → skip as "ambiguous";
-   - **any** key failing validation → skip the whole node. Attacker data is never partially applied.
-4. `ttl = min(index.valid_until(), node.valid_until()).saturating_duration_since(now)`. Record changes show up on the first refresh after the TTL expires (hickory's cache with explicit nameservers; the system stub or upstream otherwise); removals take `max(ttl, 3 × interval)`.
+   - **any** key failing validation → skip the whole node. Attacker data is never partially applied;
+   - its bf1 RR carries `node=` → skip (root values only).
+4. Index node: `ttl = min(root.valid_until(), node.valid_until()).saturating_duration_since(now)`; inline node: the root's validity alone. Record changes show up on the first refresh after the TTL expires (hickory's cache with explicit nameservers; the system stub or upstream otherwise); removals take `max(ttl, 3 × interval)`.
 
 **HTTP.**
 - Client: `reqwest::Client::builder().timeout(10s).redirect(Policy::none()).user_agent("bifrost/<ver>")`. No redirects means auth headers can't leak.
@@ -1747,7 +1762,7 @@ Each item becomes a `// ponytail: <ceiling>; <upgrade>` comment at the named loc
 | 18 | Graceful shutdown doesn't unmount | stopping the daemon leaves mounts unsupervised until restart | `bifrost unmount <all>` before stop if wanted | daemon/main.rs |
 | 19 | Only mounts directly under the current root are adopted | after a root change across a restart, old-root mounts are left alone | unmount any marker mount outside the root at startup | mount/lib.rs `adopt` |
 | 20 | No concurrency cap on mount operations | dozens of simultaneous auto-mounts each spawn ssh at once | a tokio Semaphore in the executor | daemon/actor.rs |
-| 21 | Inline root TXT machine records (the first form in PRD §6.3) and DNSSEC are not supported | publishers must use index + node records | parse `host=` at the index | discovery/dns.rs |
+| 21 | DNSSEC is not validated | a spoofed or on-path DNS answer is trusted (it still passes every bf1 validator) | hickory's dnssec feature + `validate` | discovery/dns.rs |
 | 22 | Provider warnings (skipped records) go only to the log | invisible from the CLI and TUI | `warnings` in `ProviderDto` | discovery/*, daemon |
 | 23 | macOS adoption without a marker trusts a state.json record; the driver guess falls back to "sshfs" | inspect and unmount logic is shared, so the guess is harmless | read the NFS source to tell drivers apart | mount/lib.rs |
 | 24 | TUI uses truecolor only | Terminal.app renders the RGB colours approximately | map to 256-colour indices when `COLORTERM` isn't truecolor | tui/ui.rs |
@@ -1935,3 +1950,4 @@ S4a gate: `run.sh all` passed 164/164 twice in a row, with only p07's opt-in ski
 11. **Final review r2 (bifrost-mount):** the hung-FUSE in-flight guard (guard 2) is keyed per mount instance, `<path>/.pid-<pid>` (the plain path when the handle has no pid), not per path. A lazy detach does not abort the FUSE connection, so a probe stuck on a detached hung instance used to hold the path, and every later mount there read `Degraded("unresponsive")` and was force-detached each grace period (test `liveness_keyed_per_instance`). Ceiling: at most one leaked thread per hung instance; two pid-less adoptions at one path share a key. `log_tail` (step 6) seeks to the last 2 KiB instead of reading the whole peer-sized child log into the daemon's heap (test `log_tail_reads_only_the_tail`).
 12. **Final review r3 (bifrost-daemon):** `StatusDto.providers` now starts with a `static` row (kind `static`, `machines` = machines with a static observation, `refreshes` 0, never an error or a last-ok time), so `bifrost status`, `doctor`, `discover` and the TUI Discovery view show static discovery while the daemon runs, as in §9 (`providers static ok (2) · …`, `✓ static 2 machines`); §15 #2 ("no provider object or task for static") is about internals only. A pre-existing state dir, `<state>/logs` and socket parent now get the root's check (owned by the lock's uid and not world-writable, `0o002`), else exit 1: another user who can write the state dir could swap `logs/` for their own and plant `<id>.log -> <a file of ours>`, which the child-log open (create+truncate) would clobber (test `world_writable_state_dirs_refused`). Ancestors and group-shared dirs stay unchecked, as for the root.
 13. **Final review r3 (bifrost-core):** row 11 is also gated on `ready` (`can_remount` includes it; else row 13 `Degraded("change pending: warming up")`). After a restart the registry starts empty, so a DNS/HTTP result that beats `tailscale status` built an adopted mount's candidate from the lower-trust observation and template, and row 11 remounted it to that spec and back once tailscale reported (README: a restart adopts, no remount). Rows 10 and 12 (Stale, hung past grace) still act during warm-up, and `deadline()` wakes at `cfg_loaded_at + grace`. Accepted cost: a config edit made while the daemon was down is applied up to `offline_grace_period` later when some provider is down; a DNS-only IP move is not delayed, since `ready` latches in the pass of the first non-empty Ok. Not covered: a fresh start with nothing adopted can still mount the lower-trust spec first (row 9) and remount once the higher-trust provider reports (test `row11_gated_on_driver_and_online`).
+14. **v0.1.1 (bifrost-discovery): inline node records** replace §15 #21's first half (now DNSSEC only). A root value with `node=<label>` is a machine; inline and index values mix in one RRset; a label both inline and in `nodes=`, or with two distinct inline values, is ambiguous and skipped; an invalid inline value rejects its whole node; `node=` with `nodes=` in one value is invalid; `node=` in a node record rejects that node; 256 caps inline + index labels; inline ttl = the root's validity. hickory retries a truncated UDP answer over TCP on both resolver paths with no option change (explicit `udp_and_tcp`; the system config builds the same, pinned by `system_resolver_has_tcp_fallback`). Replaces §12's p08 row: machines are inline at the root, other-01 and evil use the index and their own records, bad-node is inline (hostile data on both paths), and 20 discover-only `bulk-NN` nodes (192.0.2.0/24, tag `bulk`) push the root answer past a 1232-byte UDP reply (p08 uses explicit nameservers, so EDNS): p08 asserts all 20 discovered, the daemon's TCP root query in CoreDNS's `log`, `tc` on a UDP-only dig and all 20 over TCP. p13's zone is inline too. Tests `inline_node_records_discovered`, `inline_and_index_mixed`, `inline_node_also_in_index_is_ambiguous`, `two_distinct_inline_values_same_node_ambiguous`, `identical_inline_duplicates_ok`, `value_with_node_and_nodes_rejected`, `inline_invalid_key_rejects_whole_node`, `inline_ttl_is_root_validity`, `max_nodes_caps_inline_plus_index`, `node_key_only_valid_at_root`.

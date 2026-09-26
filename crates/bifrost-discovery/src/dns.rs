@@ -1,5 +1,6 @@
-//! DNS TXT `bf1` provider (contract §7). The index `_bifrost.<domain>.` lists node labels in `nodes=`; each
-//! node publishes one `_bifrost.<node>.<domain>.` record. Every TXT byte is untrusted: it goes through
+//! DNS TXT `bf1` provider (contract §7). The root `_bifrost.<domain>.` holds inline node records (`node=`)
+//! and index values listing node labels in `nodes=`; each index node publishes one `_bifrost.<node>.<domain>.`
+//! record. Every TXT byte is untrusted: it goes through
 //! `parse_bf1` (and the core validators) before it can reach an observation, and a bad record is skipped
 //! whole, never partially applied.
 
@@ -14,13 +15,13 @@ use hickory_resolver::net::NetError;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::RData;
 use hickory_resolver::{Resolver, TokioResolver};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tracing::warn;
 
-/// `nodes=` entries across all index RRs
+/// labels across the root RRset: inline `node=` values plus `nodes=` entries
 const MAX_NODES: usize = 256;
 
 pub struct DnsProvider {
@@ -94,14 +95,14 @@ impl DiscoveryProvider for DnsProvider {
                 Ok(l) => l,
                 // an empty view, not a failure: with the expiry registry this causes no churn
                 Err(e) if e.is_no_records_found() => {
-                    warn!(provider, record = q, "no bf1 index record");
+                    warn!(provider, record = q, "no bf1 root record");
                     return Ok(vec![]);
                 }
                 Err(e) => return Err(DiscoveryError::Failed(clean(&e.to_string(), 512))),
             };
-            let nodes = index_nodes(provider, &index);
-            if nodes.is_empty() {
-                warn!(provider, record = q, "no valid bf1 index record");
+            let (nodes, mut out) = root(provider, &self.domain, &index, Instant::now());
+            if nodes.is_empty() && out.is_empty() {
+                warn!(provider, record = q, "no valid bf1 root record");
                 return Ok(vec![]);
             }
             let mut set = JoinSet::new();
@@ -112,7 +113,6 @@ impl DiscoveryProvider for DnsProvider {
                     (n, q, l)
                 });
             }
-            let mut out = Vec::new();
             while let Some(j) = set.join_next().await {
                 let (n, q, l) = j.map_err(|e| DiscoveryError::Failed(e.to_string()))?;
                 let o =
@@ -129,7 +129,7 @@ impl DiscoveryProvider for DnsProvider {
                     ),
                 }
             }
-            out.sort_by(|a, b| a.id.cmp(&b.id)); // ids are distinct: one per deduplicated label
+            out.sort_by(|a, b| a.id.cmp(&b.id)); // ids are distinct: inline and index labels are disjoint
             Ok(out)
         })
     }
@@ -138,6 +138,8 @@ impl DiscoveryProvider for DnsProvider {
 /// no driver (E2)
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Bf1 {
+    /// root values only: an inline node record, identity = this label
+    pub node: Option<String>,
     pub nodes: Vec<String>,
     pub host: Option<Host>,
     pub port: Option<u16>,
@@ -169,8 +171,8 @@ pub fn dns_label(s: &str) -> Result<String, Invalid> {
 /// S := concat(character-strings), ≤ 2048 bytes;  record := token *(1*SP token);  token := key "=" value
 /// key := 1*32 [a-z0-9_-];  value := 1*256 (%x21-7E except '"');  first token "v=bf1" else Ok(None)
 /// ```
-/// Missing '=', a bad key or value, a duplicate key or a known key failing validation → Err (record invalid).
-/// Unknown keys are ignored, `driver=` included (E2).
+/// Missing '=', a bad key or value, a duplicate key, a known key failing validation, or `node=` with
+/// `nodes=` → Err (record invalid). Unknown keys are ignored, `driver=` included (E2).
 pub fn parse_bf1(txt: &str) -> Result<Option<Bf1>, String> {
     let mut toks = txt.split(' ');
     if toks.next() != Some("v=bf1") {
@@ -202,6 +204,7 @@ pub fn parse_bf1(txt: &str) -> Result<Option<Bf1>, String> {
             return Err(format!("duplicate key {k:?}"));
         }
         match k {
+            "node" => r.node = Some(dns_label(v).map_err(inv)?),
             "nodes" => {
                 r.nodes = v
                     .split(',')
@@ -233,6 +236,9 @@ pub fn parse_bf1(txt: &str) -> Result<Option<Bf1>, String> {
             "id" => r.id = Some(native_id(v).map_err(inv)?),
             _ => {} // unknown, driver= included (E2)
         }
+    }
+    if r.node.is_some() && !r.nodes.is_empty() {
+        return Err("node= and nodes= in one value".into());
     }
     Ok(Some(r))
 }
@@ -279,15 +285,40 @@ fn txts(l: &Lookup) -> Vec<String> {
     l.answers().iter().filter_map(|r| s(&r.data)).collect()
 }
 
-/// The union of `nodes=` over the valid bf1 index RRs: sorted, deduplicated, at most MAX_NODES.
-/// An invalid index RR is skipped with a warning; the others still count.
-// ponytail: inline root TXT machine records (PRD §6.3 first form) and DNSSEC are not supported, publishers must use index + node records; parse `host=` at the index
-fn index_nodes(provider: &str, index: &Lookup) -> Vec<String> {
-    let record = index.query().name().to_string();
-    let mut nodes = BTreeSet::new();
-    for s in txts(index) {
+/// The root RRset → (index nodes to look up, inline node observations). A `v=bf1` value with a `node=` token
+/// is an inline node record, grouped by that label (not a DNS label → skipped, no cap slot) before parsing so
+/// an invalid value still rejects its node;
+/// any other valid bf1 value is an index value whose `nodes=` count (an invalid one is skipped with a warning).
+/// At most MAX_NODES labels of the sorted union; a label both inline and in `nodes=` is ambiguous and skipped.
+/// Inline ttl = the root's validity.
+// ponytail: DNSSEC is not validated, a spoofed or on-path answer is trusted; hickory's dnssec feature + `validate`
+fn root(
+    provider: &str,
+    domain: &Host,
+    l: &Lookup,
+    now: Instant,
+) -> (Vec<String>, Vec<MachineObservation>) {
+    let record = l.query().name().to_string();
+    let (mut index, mut inline) = (BTreeSet::new(), BTreeMap::<String, Vec<String>>::new());
+    for s in txts(l) {
+        let label = s
+            .strip_prefix("v=bf1 ")
+            .and_then(|t| t.split(' ').find_map(|t| t.strip_prefix("node=")));
+        if let Some(n) = label {
+            match dns_label(n) {
+                Ok(n) => inline.entry(n).or_default().push(s),
+                Err(e) => warn!(
+                    provider,
+                    record,
+                    node = clean(n, 128),
+                    reason = clean(&e.to_string(), 512),
+                    "bf1 node skipped"
+                ),
+            }
+            continue;
+        }
         match parse_bf1(&s) {
-            Ok(r) => nodes.extend(r.into_iter().flat_map(|r| r.nodes)),
+            Ok(r) => index.extend(r.into_iter().flat_map(|r| r.nodes)),
             Err(e) => warn!(
                 provider,
                 record,
@@ -296,19 +327,59 @@ fn index_nodes(provider: &str, index: &Lookup) -> Vec<String> {
             ),
         }
     }
-    if nodes.len() > MAX_NODES {
+    let labels: BTreeSet<&String> = index.iter().chain(inline.keys()).collect();
+    if labels.len() > MAX_NODES {
         warn!(
             provider,
             record,
-            count = nodes.len(),
+            count = labels.len(),
             "more than {MAX_NODES} bf1 nodes, the rest ignored"
         );
     }
-    nodes.into_iter().take(MAX_NODES).collect()
+    let ttl = l.valid_until().saturating_duration_since(now);
+    let (mut look, mut out) = (Vec::new(), Vec::new());
+    for n in labels.into_iter().take(MAX_NODES) {
+        let o = match inline.get(n) {
+            None => {
+                look.push(n.clone());
+                continue;
+            }
+            Some(_) if index.contains(n) => Err("ambiguous: inline and in nodes=".into()),
+            Some(v) => one(v).and_then(|r| node_observation(n, domain, &r, ttl)),
+        };
+        match o {
+            Ok(o) => out.push(o),
+            Err(e) => warn!(
+                provider,
+                record,
+                node = clean(n, 128),
+                reason = clean(&e, 512),
+                "bf1 node skipped"
+            ),
+        }
+    }
+    (look, out)
 }
 
-/// One node's TXT lookup → its observation. Err = skip the whole node: zero bf1 RRs, more than one distinct
-/// bf1 RR (ambiguous), or ANY bf1 RR failing validation. ttl = min(index, node) validity from `now`.
+/// A node's bf1 values → its one record. Err: zero bf1 values, more than one distinct one (ambiguous), or ANY
+/// failing validation. Other TXT is ignored.
+fn one(vals: &[String]) -> Result<Bf1, String> {
+    let mut found: Vec<Bf1> = Vec::new();
+    for s in vals {
+        if let Some(r) = parse_bf1(s)?
+            && !found.contains(&r)
+        {
+            found.push(r);
+        }
+    }
+    if found.len() > 1 {
+        return Err(format!("ambiguous: {} distinct bf1 records", found.len()));
+    }
+    found.pop().ok_or_else(|| "no bf1 record".into())
+}
+
+/// One index node's TXT lookup → its observation. Err = skip the whole node: `one()` failed, or its record
+/// carries `node=` (root values only). ttl = min(index, node) validity from `now`.
 fn node(
     label: &str,
     domain: &Host,
@@ -316,24 +387,14 @@ fn node(
     l: &Lookup,
     now: Instant,
 ) -> Result<MachineObservation, String> {
-    let mut found: Vec<Bf1> = Vec::new();
-    for s in txts(l) {
-        if let Some(r) = parse_bf1(&s)?
-            && !found.contains(&r)
-        {
-            found.push(r);
-        }
+    let r = one(&txts(l))?;
+    if r.node.is_some() {
+        return Err("node= in a node record (root values only)".into());
     }
-    let [r] = &found[..] else {
-        return Err(match found.len() {
-            0 => "no bf1 record".into(),
-            n => format!("ambiguous: {n} distinct bf1 records"),
-        });
-    };
     let ttl = index_until
         .min(l.valid_until())
         .saturating_duration_since(now);
-    node_observation(label, domain, r, ttl)
+    node_observation(label, domain, &r, ttl)
 }
 
 #[cfg(test)]
@@ -471,17 +532,16 @@ mod tests {
         rrs.push(&["v=bf1 nodes=n000,n001"]); // duplicates
         rrs.push(&["v=bf1 nodes=zz.evil.com"]); // invalid RR: skipped
         rrs.push(&["v=spf1 -all"]);
-        let got = index_nodes("dns", &lk(&rrs, Instant::now()));
+        let (d, now) = (h("test.bifrost"), Instant::now());
+        let index_nodes = |l: &Lookup| root("dns", &d, l, now).0;
+        let got = index_nodes(&lk(&rrs, now));
         assert_eq!(got, names[..256]);
         // no valid index RR → no nodes
-        let l = lk(&[&["v=bf1 nodes=a.b"], &["v=spf1"]], Instant::now());
-        assert!(index_nodes("dns", &l).is_empty());
+        let l = lk(&[&["v=bf1 nodes=a.b"], &["v=spf1"]], now);
+        assert!(index_nodes(&l).is_empty());
         // nodes from every valid RR; host= at the index is ignored
-        let l = lk(
-            &[&["v=bf1 nodes=b,a"], &["v=bf1 nodes=c host=h"]],
-            Instant::now(),
-        );
-        assert_eq!(index_nodes("dns", &l), ["a", "b", "c"]);
+        let l = lk(&[&["v=bf1 nodes=b,a"], &["v=bf1 nodes=c host=h"]], now);
+        assert_eq!(index_nodes(&l), ["a", "b", "c"]);
     }
 
     #[test]
@@ -572,6 +632,156 @@ mod tests {
         assert_eq!(ttl(now, now + s(8)), Some(Duration::ZERO));
     }
 
+    /// root() of a root RRset with one RR per value, valid for 5s
+    fn rt(vals: &[&str]) -> (Vec<String>, Vec<MachineObservation>) {
+        let rrs: Vec<[&str; 1]> = vals.iter().map(|v| [*v]).collect();
+        let rrs: Vec<&[&str]> = rrs.iter().map(|r| &r[..]).collect();
+        let now = Instant::now();
+        let l = lk(&rrs, now + Duration::from_secs(5));
+        root("dns", &h("test.bifrost"), &l, now)
+    }
+    fn ids(o: &[MachineObservation]) -> Vec<&str> {
+        o.iter().map(|o| o.id.as_str()).collect()
+    }
+
+    #[test]
+    fn inline_node_records_discovered() {
+        let (look, obs) = rt(&[
+            "v=bf1 node=agent-01 host=10.0.0.5 user=sami tags=dev,agent",
+            "v=bf1 node=agent-02 tags=dev",
+            "v=bf1 node=agent-03 port=2222 path=/srv/data id=nkey-3",
+            "v=spf1 node=x -all",
+        ]);
+        assert!(look.is_empty(), "{look:?}");
+        assert_eq!(ids(&obs), ["agent-01", "agent-02", "agent-03"]);
+        assert_eq!(obs[0].addresses, [h("10.0.0.5")]);
+        assert_eq!(obs[0].hints.user, Some(User::parse("sami").unwrap()));
+        assert!(obs[0].metadata.tags.contains("dev") && obs[0].metadata.tags.contains("agent"));
+        assert_eq!(obs[1].addresses, [h("agent-02.test.bifrost")]); // <node>.<domain>
+        assert_eq!(obs[2].port, Some(2222));
+        assert_eq!(obs[2].native_id.as_deref(), Some("nkey-3"));
+        assert_eq!(
+            obs[2].hints.path,
+            Some(RemotePath::parse("/srv/data").unwrap())
+        );
+    }
+
+    #[test]
+    fn inline_and_index_mixed() {
+        let (look, obs) = rt(&[
+            "v=bf1 nodes=idx-02,idx-01",
+            "v=bf1 node=inl-01 tags=dev",
+            "v=bf1 nodes=idx-03",
+        ]);
+        assert_eq!(look, ["idx-01", "idx-02", "idx-03"]); // looked up at _bifrost.<node>.<domain>.
+        assert_eq!(ids(&obs), ["inl-01"]); // never looked up
+    }
+
+    #[test]
+    fn inline_node_also_in_index_is_ambiguous() {
+        let (look, obs) = rt(&["v=bf1 nodes=a,b", "v=bf1 node=a host=10.0.0.1"]);
+        assert_eq!(look, ["b"]);
+        assert!(obs.is_empty());
+    }
+
+    #[test]
+    fn two_distinct_inline_values_same_node_ambiguous() {
+        let (_, obs) = rt(&[
+            "v=bf1 node=a host=10.0.0.1",
+            "v=bf1 node=a host=10.0.0.2",
+            "v=bf1 node=b",
+        ]);
+        assert_eq!(ids(&obs), ["b"]);
+    }
+
+    #[test]
+    fn identical_inline_duplicates_ok() {
+        let (_, obs) = rt(&["v=bf1 node=a host=10.0.0.1", "v=bf1  node=a host=10.0.0.1"]);
+        assert_eq!(ids(&obs), ["a"]);
+        assert_eq!(obs[0].addresses, [h("10.0.0.1")]);
+    }
+
+    #[test]
+    fn value_with_node_and_nodes_rejected() {
+        assert!(parse_bf1("v=bf1 node=a nodes=b").is_err());
+        assert!(parse_bf1("v=bf1 nodes=b node=a").is_err());
+        let (look, obs) = rt(&["v=bf1 node=a nodes=b", "v=bf1 nodes=c"]);
+        assert_eq!(look, ["c"]);
+        assert!(obs.is_empty());
+    }
+
+    #[test]
+    fn inline_invalid_key_rejects_whole_node() {
+        for bad in [
+            "v=bf1 node=a host=-oProxyCommand=x",
+            "v=bf1 node=a id=../x",
+            "v=bf1 node=a tags=dev port=0",
+        ] {
+            let (look, obs) = rt(&[bad, "v=bf1 node=b"]);
+            assert!(look.is_empty(), "{bad}");
+            assert_eq!(ids(&obs), ["b"], "{bad}");
+            // next to a valid value for the same node: still the whole node, never partial
+            let (_, obs) = rt(&[bad, "v=bf1 node=a host=10.0.0.1"]);
+            assert!(obs.is_empty(), "{bad}");
+        }
+        // not a label: no node, and never a query into another domain
+        for bad in ["a.evil.com", "A", "-a", "../x"] {
+            let (look, obs) = rt(&[&format!("v=bf1 node={bad}")]);
+            assert!(look.is_empty() && obs.is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn inline_ttl_is_root_validity() {
+        let now = Instant::now();
+        let l = lk(&[&["v=bf1 node=a"]], now + Duration::from_secs(7));
+        let (_, obs) = root("dns", &h("test.bifrost"), &l, now);
+        assert_eq!(obs[0].ttl, Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn max_nodes_caps_inline_plus_index() {
+        // 200 index + 100 inline: each under 256, the union over it → the first 256 labels
+        let names: Vec<String> = (0..300).map(|i| format!("n{i:03}")).collect();
+        let mut vals: Vec<String> = names[..200]
+            .chunks(50)
+            .map(|c| format!("v=bf1 nodes={}", c.join(",")))
+            .collect();
+        vals.extend(names[200..].iter().map(|n| format!("v=bf1 node={n}")));
+        vals.push("v=bf1 node=A".into()); // not a label: takes no slot (sorts first)
+        let (look, obs) = rt(&vals.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(look, names[..200]);
+        assert_eq!(ids(&obs), names[200..256]);
+    }
+
+    #[test]
+    fn node_key_only_valid_at_root() {
+        // stricter than ignoring it: a per-node record carrying node= (its own label too) rejects that node
+        let (d, now) = (h("test.bifrost"), Instant::now());
+        let u = now + Duration::from_secs(5);
+        for v in ["v=bf1 node=n1 host=10.0.0.1", "v=bf1 node=other"] {
+            let e = node("n1", &d, u, &lk(&[&[v]], u), now).unwrap_err();
+            assert!(e.contains("node="), "{e}");
+        }
+    }
+
+    /// hickory retries a truncated UDP answer over TCP only on a server with a TCP connection. A big inline
+    /// root RRset outgrows a UDP reply (1232 bytes with EDNS; 512 on unix unless resolv.conf has
+    /// `options edns0`), so the system resolver's servers must have one too, like the explicit `udp_and_tcp` ones.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_resolver_has_tcp_fallback() {
+        use hickory_resolver::config::ProtocolConfig;
+        let (c, _) =
+            hickory_resolver::system_conf::parse_resolv_conf("nameserver 192.0.2.1\n").unwrap();
+        let conns = &c.name_servers()[0].connections;
+        assert!(
+            conns
+                .iter()
+                .any(|c| matches!(c.protocol, ProtocolConfig::Tcp))
+        );
+    }
+
     #[tokio::test]
     async fn system_resolver_read_per_refresh() {
         // nothing read at build time: an offline start (no nameserver yet) or a later network change can't pin
@@ -593,7 +803,12 @@ mod tests {
         let p = DnsProvider::new("dns".into(), h("test.bifrost"), vec![ns]).unwrap();
         let obs = p.discover().await.unwrap();
         let ids: Vec<&str> = obs.iter().map(|o| o.id.as_str()).collect();
-        assert_eq!(ids, ["agent-dns", "other-01"]); // bad-node and evil skipped
+        // bad-node and evil skipped; the root answer only fits over TCP (a 1232-byte UDP one is truncated)
+        let mut want = vec!["agent-dns".to_string()];
+        want.extend((1..=20).map(|i| format!("bulk-{i:02}")));
+        want.push("other-01".into());
+        assert_eq!(ids, want);
+        assert_eq!(obs[20].addresses, [h("192.0.2.20")]);
         let a = &obs[0];
         assert_eq!(
             (&a.addresses[..], a.port),
@@ -606,7 +821,7 @@ mod tests {
         );
         assert!(a.metadata.tags.contains("dev") && a.native_id.is_none());
         assert!(a.ttl.unwrap() <= Duration::from_secs(5));
-        assert!(obs[1].metadata.tags.contains("misc"));
+        assert!(obs[21].metadata.tags.contains("misc")); // other-01: index + its own record
         // NXDOMAIN on the index: an empty view, not an error
         let p = DnsProvider::new("dns".into(), h("none.test.bifrost"), vec![ns]).unwrap();
         assert_eq!(p.discover().await, Ok(vec![]));
