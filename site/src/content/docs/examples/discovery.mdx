@@ -220,7 +220,8 @@ jq -Rn '{machines: [inputs | select(length > 0) | split(" ")
 ```
 
 Each line becomes `{"name": "agent-01", "host": "10.20.0.4", "metadata": {"tags": ["dev", "agent"]}}`. Rerun it
-whenever the list changes; the next refresh picks the file up.
+whenever the list changes; the next refresh picks up new and changed lines, and a removed machine is dropped
+after [3 × `interval`](/bifrost/guides/discovery/#refresh-and-expiry).
 
 ## All together
 
@@ -275,7 +276,7 @@ _bifrost.db-01      IN TXT "v=bf1 host=10.0.0.30 tags=prod"
 | `devbox-old` | Tailscale, `tag:dev` | `denied (policy.deny names=*-old)` | a global deny beats every allow |
 | `laptop` | Tailscale, no tags | `discover-only` | no rule allows it |
 | `agent-01` | Tailscale, no tags; `infra` | `discover-only` | Tailscale is more trusted, so its report alone decides. `infra` is listed as shadowed |
-| `agent-02` | Tailscale, `tag:dev`; `infra` | `allowed (infra.filter.include)` | the exclude drops Tailscale's report, so DNS decides and supplies `10.0.0.12` |
+| `agent-02` | Tailscale, `tag:dev`; `infra` | `allowed (infra.filter.include)` | the exclude drops Tailscale's report (still listed as shadowed), so DNS decides and supplies `10.0.0.12` |
 | `db-01` | `infra`, `tags=prod` | `denied (policy.deny tags=prod)` | |
 
 See [Policy and filtering](/bifrost/guides/policy/) for the rules behind each verdict.

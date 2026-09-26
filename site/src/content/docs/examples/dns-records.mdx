@@ -355,8 +355,8 @@ include_names = ["lab-*"]
 read_only = true
 ```
 
-A second provider of a type needs its own `name`, which then shows in verdicts
-(`allowed (staging.filter.include)`), in `bifrost discover` and in the SOURCE column. Without one:
+A provider's `name` shows in verdicts (`allowed (staging.filter.include)`), in `bifrost discover` and in the
+SOURCE column. A provider without one is named after its type, so two unnamed DNS providers clash:
 
 ```console
 $ bifrost config check
