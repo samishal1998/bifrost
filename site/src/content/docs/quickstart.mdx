@@ -1,0 +1,89 @@
+---
+title: Quickstart
+description: Mount one machine over SSHFS with a four-line config.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+This is the smallest useful Bifröst: one machine from your config, mounted over SSHFS, kept alive by the
+daemon. You need Bifröst [installed](/bifrost/installation/), plus `sshfs` and FUSE.
+
+<Steps>
+
+1. **Check that plain SSH works without a prompt.** Bifröst runs `ssh` with `BatchMode=yes` and never asks for
+   anything, so you need a key or an agent, and the host key already in `known_hosts`:
+
+   ```sh
+   ssh -o BatchMode=yes sami@agent-01 true && echo ok
+   ```
+
+   If this asks for a password or a host key, fix that first
+   ([host keys](/bifrost/guides/troubleshooting/#host-key-verification-failed)).
+
+2. **Write `~/.config/bifrost/config.toml`:**
+
+   ```toml title="~/.config/bifrost/config.toml"
+   [mount]
+   root = "~/machines"
+
+   [[machines]]
+   name = "agent-01"
+   host = "agent-01"
+   user = "sami"
+   remote = "/home/sami"
+   ```
+
+3. **Validate it.** No daemon needed:
+
+   ```console
+   $ bifrost config check
+   ok: /home/sami/.config/bifrost/config.toml (1 machines, 0 providers, 1 mounts, root /home/sami/machines)
+   ```
+
+4. **Start the daemon:**
+
+   ```sh
+   bifrostd &
+   ```
+
+   For daily use, run it as a [systemd user service](/bifrost/guides/service/) instead.
+
+5. **Look at what it did:**
+
+   ```console
+   $ bifrost status
+   bifrostd 0.1.0  pid 4242  up 12s  /run/user/1000/bifrost/bifrost.sock
+   config    /home/sami/.config/bifrost/config.toml (ok)
+   root      /home/sami/machines
+   machines  1 (1 eligible)   mounts 1/1 mounted, 0 degraded, 0 failed
+   providers static ok (1)
+   drivers   rclone ✓ · rclone-nfs ✗ macOS only · sshfs ✓ (default)
+
+   $ ls ~/machines/agent-01/
+   ```
+
+6. **Take it down and bring it back:**
+
+   ```console
+   $ bifrost unmount agent-01
+   agent-01  unmounted (held; 'bifrost mount agent-01' to resume)
+   $ bifrost mount agent-01
+   agent-01  mounted  /home/sami/machines/agent-01 (sshfs, pid 4242)
+   ```
+
+   An unmount is a *hold*: the mount stays down, even across daemon restarts, until you mount it again. Both
+   commands wait up to 60 seconds for the result unless you pass `--no-wait`.
+
+</Steps>
+
+<Aside type="note">
+Stopping `bifrostd` does not unmount anything. The next start adopts the running mounts without a remount.
+</Aside>
+
+## Where next
+
+- Watch it live with `bifrost-tui`. The keys are in the [TUI reference](/bifrost/reference/tui/).
+- Find machines automatically with [discovery providers](/bifrost/guides/discovery/): Tailscale, DNS or an HTTP
+  inventory.
+- Decide which discovered machines may be mounted with [policy](/bifrost/guides/policy/).
+- Something off? Run `bifrost doctor` and read [Troubleshooting](/bifrost/guides/troubleshooting/).

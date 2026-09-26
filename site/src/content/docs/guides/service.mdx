@@ -1,0 +1,88 @@
+---
+title: Running as a service
+description: Run bifrostd as a systemd user service that survives restarts without dropping mounts.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+`bifrostd` takes no options besides `--version` and `--help`. Everything comes from the environment:
+`BIFROST_CONFIG`, `BIFROST_SOCKET`, `BIFROST_STATE_DIR` and `BIFROST_LOG`. It runs as your own user.
+
+## systemd user unit
+
+<Steps>
+
+1. Create `~/.config/systemd/user/bifrost.service`:
+
+   ```ini title="~/.config/systemd/user/bifrost.service"
+   [Unit]
+   Description=Bifröst: remote machines as local folders
+
+   [Service]
+   ExecStart=%h/.local/bin/bifrostd
+   ExecReload=/bin/kill -HUP $MAINPID
+   Environment=BIFROST_LOG=info
+   Restart=on-failure
+   # the mount helpers live in the unit's cgroup: only stop bifrostd, so they keep serving and are adopted on restart
+   KillMode=process
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+2. Give the daemon your SSH agent, then enable it:
+
+   ```sh
+   systemctl --user import-environment SSH_AUTH_SOCK
+   systemctl --user daemon-reload
+   systemctl --user enable --now bifrost
+   ```
+
+   `import-environment` lasts until you log out. Put it in your login profile so it runs every session.
+
+3. Check on it:
+
+   ```sh
+   bifrost status
+   journalctl --user -u bifrost -f
+   ```
+
+</Steps>
+
+`systemctl --user reload bifrost` sends `SIGHUP`, which reloads the config at once.
+
+## Why `KillMode=process`
+
+sshfs and rclone run as children of `bifrostd`, inside the unit's cgroup. With the default
+`KillMode=control-group`, stopping or restarting the unit sends SIGTERM to every child and every mount drops.
+With `KillMode=process` only `bifrostd` stops: the mounts keep serving, and the next start adopts them in place,
+same process, no remount. A crash takes the same path.
+
+To actually tear a mount down, use `bifrost unmount <target>`.
+
+<Aside type="danger" title="No namespace sandboxing">
+Do not set `ProtectHome=`, `PrivateMounts=` or other namespace options on this unit. The mounts would land in
+a private mount namespace that your shell can't see.
+</Aside>
+
+## The SSH agent
+
+The daemon's ssh inherits `SSH_AUTH_SOCK` from its environment, and a user service does not get your login
+shell's environment by default. `bifrost doctor` tells you which side you're on:
+
+```text
+SSH            ✓ ssh /usr/bin/ssh   ✓ SSH_AUTH_SOCK visible to daemon
+```
+
+If it shows `✗ SSH_AUTH_SOCK not visible to daemon`, run the `import-environment` line above and
+`systemctl --user restart bifrost`. A key without a passphrase works without an agent.
+
+## Stopping cleanly
+
+`SIGTERM` or `SIGINT` stops the API, lets in-flight mount operations finish (up to 5 seconds), writes
+`state.json`, removes the socket and exits 0. It does not unmount anything.
+
+## macOS
+
+No launchd agent ships with Bifröst yet. Start `bifrostd` from a terminal, or write a LaunchAgent that runs
+`~/.local/bin/bifrostd` with your environment.

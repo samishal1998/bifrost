@@ -1,0 +1,76 @@
+---
+title: Remote worlds. Local files.
+description: Bifröst keeps remote machines mounted as ordinary folders under ~/machines. It finds them through your config, Tailscale, DNS or an HTTP inventory, mounts only what your policy allows, and keeps reconciling until what is mounted matches what you asked for.
+template: splash
+hero:
+  tagline: Remote worlds. Local files.
+  actions:
+    - text: Get started
+      link: /installation/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/samishal1998/bifrost
+      icon: github
+      variant: minimal
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+import discovery from '../../assets/icons/discovery.png';
+import modular from '../../assets/icons/modular.png';
+import mount from '../../assets/icons/mount.png';
+import bridges from '../../assets/icons/bridges.png';
+
+<ul class="bf-pillars not-content">
+	<li class="bf-pillar">
+		<span class="bf-icon" aria-hidden="true" style={`--icon: url(${discovery.src})`}></span>
+		<h3>Discovery</h3>
+		<p>Find what is near or far</p>
+	</li>
+	<li class="bf-pillar">
+		<span class="bf-icon" aria-hidden="true" style={`--icon: url(${modular.src})`}></span>
+		<h3>Modular</h3>
+		<p>Drivers for any world</p>
+	</li>
+	<li class="bf-pillar">
+		<span class="bf-icon" aria-hidden="true" style={`--icon: url(${mount.src})`}></span>
+		<h3>Mount</h3>
+		<p>Remote feels local</p>
+	</li>
+	<li class="bf-pillar">
+		<span class="bf-icon" aria-hidden="true" style={`--icon: url(${bridges.src})`}></span>
+		<h3>Bridges</h3>
+		<p>People, machines, realms</p>
+	</li>
+</ul>
+
+## Install
+
+```sh
+curl -fsSL https://samishal1998.github.io/bifrost/install.sh | sh
+```
+
+For Linux and macOS on x86_64 and arm64. The script checks the download against its SHA-256 and puts
+`bifrost`, `bifrostd` and `bifrost-tui` in `~/.local/bin`. It never uses sudo.
+[Other ways to install](/bifrost/installation/).
+
+## How it works
+
+```text
+discovery → registry → policy → desired mounts → reconciler → mount drivers → ~/machines/<id>
+```
+
+A daemon, `bifrostd`, finds machines, decides which ones you allow, and keeps their remote paths mounted with
+SSHFS or rclone. Finding a machine is never permission to mount it. The `bifrost` CLI and the `bifrost-tui`
+terminal UI talk to the daemon over a private Unix socket.
+
+Bifröst is not a VPN, a sync engine or a distributed filesystem. It uses the network and the SSH trust you
+already have.
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Quickstart" description="Mount your first machine in five minutes." href="/bifrost/quickstart/" />
+	<LinkCard title="Configuration" description="Every key, default and rule in config.toml." href="/bifrost/guides/configuration/" />
+	<LinkCard title="Discovery providers" description="Static, Tailscale, DNS TXT and HTTP inventories." href="/bifrost/guides/discovery/" />
+	<LinkCard title="CLI reference" description="Commands, flags and exit codes." href="/bifrost/reference/cli/" />
+</CardGrid>

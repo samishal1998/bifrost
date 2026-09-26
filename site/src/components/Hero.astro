@@ -1,0 +1,106 @@
+---
+// Landing hero, laid out like the approved brand board: the aurora bridge beside the lockup.
+// Replaces Starlight's Hero, which renders its image as a 400×400 square (crops a 16:9 scene).
+import { Image } from 'astro:assets';
+import { LinkButton } from '@astrojs/starlight/components';
+import aurora from '../assets/hero-aurora.webp';
+import logoColor from '../assets/logo-color-hero.png';
+import logoLight from '../assets/logo-light-hero.png';
+
+const { data } = Astro.locals.starlightRoute.entry;
+const { tagline, actions = [] } = data.hero ?? {};
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const withBase = (link: string) => (link.startsWith('/') ? base + link : link);
+---
+
+<div class="bf-hero">
+	<div class="bf-hero-copy">
+		<h1 id="_top" data-page-title>
+			<Image src={logoColor} alt="Bifröst" width={304} densities={[1, 2]} loading="eager" class="dark:sl-hidden" />
+			<Image src={logoLight} alt="Bifröst" width={304} densities={[1, 2]} loading="eager" class="light:sl-hidden" />
+		</h1>
+		{tagline && <p class="bf-tagline">{tagline}</p>}
+		{data.description && <p class="bf-pitch">{data.description}</p>}
+		<div class="bf-actions">
+			{
+				actions.map(({ link, text, variant, icon }) => (
+					<LinkButton href={withBase(link)} variant={variant} icon={icon?.type === 'icon' ? icon.name : undefined}>
+						{text}
+					</LinkButton>
+				))
+			}
+		</div>
+	</div>
+	<Image
+		src={aurora}
+		alt="A bridge of glass arching between two icy shores under a green aurora"
+		widths={[640, 960, 1280, 1672]}
+		sizes="(min-width: 72rem) 36rem, (min-width: 50rem) 55vw, 100vw"
+		loading="eager"
+		fetchpriority="high"
+		class="bf-hero-art"
+	/>
+</div>
+
+<style>
+	.bf-hero {
+		display: grid;
+		gap: 2rem;
+		align-items: center;
+		padding-block: 1rem 2rem;
+	}
+	.bf-hero-art {
+		order: -1;
+		width: 100%;
+		height: auto;
+		border-radius: 1rem;
+		border: 1px solid var(--bf-frame);
+		box-shadow: 0 1.5rem 4rem -1.5rem var(--bf-glow);
+	}
+	.bf-hero-copy {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		text-align: center;
+		gap: 1.25rem;
+	}
+	h1 img {
+		width: min(19rem, 80vw);
+		height: auto;
+	}
+	.bf-tagline {
+		margin: 0;
+		font-size: var(--sl-text-sm);
+		letter-spacing: 0.32em;
+		text-transform: uppercase;
+		color: var(--sl-color-gray-2);
+	}
+	.bf-pitch {
+		margin: 0;
+		max-width: 34rem;
+		padding-top: 1.25rem;
+		border-top: 1px solid var(--sl-color-hairline-light);
+		color: var(--sl-color-gray-2);
+		font-size: var(--sl-text-lg);
+	}
+	.bf-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 1rem 1.5rem;
+		justify-content: center;
+	}
+	@media (min-width: 50rem) {
+		.bf-hero {
+			grid-template-columns: 7fr 5fr;
+			gap: 3rem;
+			padding-block: 3rem 3.5rem;
+		}
+		.bf-hero-copy {
+			align-items: flex-start;
+			text-align: start;
+		}
+		.bf-actions {
+			justify-content: flex-start;
+		}
+	}
+</style>

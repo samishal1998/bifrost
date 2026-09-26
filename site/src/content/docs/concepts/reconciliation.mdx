@@ -1,0 +1,96 @@
+---
+title: States and reconciliation
+description: The states a machine and a mount can be in, and the rules the reconciler follows to move between them.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The reconciler compares what should be mounted with what is mounted and takes one step toward agreement. Each
+pass is a pure function of its inputs, so running it twice in a row changes nothing the second time.
+
+## States
+
+A mount is always in one of these states. `bifrost mounts`, the TUI and the API show them.
+
+| State | Glyph | Meaning |
+|---|---|---|
+| `eligible` | ○ | Wanted, not mounted yet; or held down by `bifrost unmount` (`held: true`) |
+| `connecting` | ◌ | A mount is in progress |
+| `mounted` | ● | Mounted, and healthy or not yet probed |
+| `degraded` | ◐ | Mounted, but the health probe fails or finds the mount dead |
+| `unmounting` | ◌ | An unmount is in progress |
+| `offline` | ○ | The machine is reported offline, or the mount was detached after hanging past the grace period. Still wanted; retrying |
+| `failed` | ✕ | The last attempt failed, or no driver is available. `last_error` or `detail` says why |
+| `unknown` | ○ | An adopted mount whose machine hasn't been reported yet |
+
+A machine's state is `discovered` when policy doesn't allow it, `eligible` when it is allowed but has no mounts,
+and otherwise the most severe state among its mounts, in this order: failed, degraded, offline, unmounting,
+connecting, mounted, eligible.
+
+The usual path when a remote machine drops off the network is mounted → degraded (the probe fails) → offline
+(the grace period ran out, the mount was detached lazily, and Bifröst keeps retrying).
+
+## The decision rules
+
+For each mount, the first rule that applies decides.
+
+**While a mount or unmount is in progress**, wait. Nothing else happens to that mount until it finishes.
+
+**When the mount is not wanted** (policy no longer allows it, its machine expired, or you held it down):
+
+- If it isn't mounted, there is nothing to do.
+- If it is dead (stale) or you asked for `--force`, detach it lazily.
+- If the daemon is still warming up and the mount wasn't held manually, leave it alone for now.
+- Otherwise unmount it gracefully. If files are open, it stays mounted and the unmount is retried with backoff.
+  It is never forced automatically.
+
+**When the mount is wanted but not mounted:**
+
+- If no driver is available, wait and say which one is missing.
+- If the provider reports the machine offline, wait for it to come back.
+- If the last attempt failed, wait for the backoff to run out.
+- Otherwise mount it.
+
+**When the mount is wanted and mounted:**
+
+- If it is dead (stale), detach it lazily; the fresh mount follows on a later pass.
+- If its spec changed (a new host, path, user, driver or option), remount gracefully. This happens only when the
+  new spec can actually be mounted: its driver is available, the machine is not reported offline, and warm-up is
+  done. Until then the working mount stays and shows `degraded (change pending: …)`.
+- If it has been degraded for longer than `offline_grace_period`, detach it lazily.
+- If it is degraded for a shorter time, report it and let sshfs's reconnect work on it.
+- Otherwise it is healthy: nothing to do. A working mount is never removed just because its machine is reported
+  offline.
+
+A remount is always an unmount first. The new mount comes from the "wanted but not mounted" rules on a later
+pass, so the offline and backoff checks still apply.
+
+## Warm-up
+
+Right after the daemon starts, discovery hasn't answered yet, so an empty view means nothing. Until warm-up is
+done, mounts that aren't wanted are not unmounted (dead or force-requested ones and your manual holds still go
+through), and spec-change remounts wait.
+
+Warm-up is done once every network provider has returned a non-empty result at least once, or when
+`offline_grace_period` has passed since the config loaded. A static-only config is ready at once. Without a
+config file, the daemon stays in warm-up and removes nothing.
+
+## Retries
+
+- A failure schedules a retry with exponential backoff and jitter, from `retry_initial` up to `retry_max`.
+- The failure count resets only after a mount has stayed healthy for `retry_max`, so a mount that dies right
+  after mounting keeps backing off instead of looping.
+- `bifrost mount <id>` clears the backoff and the hold and retries at once. `bifrost reconcile` runs a pass but
+  leaves the backoff alone.
+
+## Adoption
+
+Each mount carries a marker, `bifrost:<id>@<fingerprint>`, in the kernel mount table. The fingerprint covers
+the whole spec, host included. When the daemon starts, it finds its own markers under its root and adopts those
+mounts as they are, with no remount. A mount whose fingerprint no longer matches the config is remounted
+gracefully by the spec-change rule above.
+
+<Aside type="note">
+That is why restarting or upgrading `bifrostd` never interrupts your mounts, and why a crash and a restart take
+the same, tested path.
+</Aside>

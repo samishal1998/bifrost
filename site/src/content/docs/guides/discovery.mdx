@@ -1,0 +1,184 @@
+---
+title: Discovery providers
+description: Find machines from your config, your tailnet, DNS TXT records or an HTTP inventory.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A provider reports machines. [Policy](/bifrost/guides/policy/) decides which of them are mounted. Providers are
+listed in trust order, most trusted first:
+
+| Provider | `type` | Trust | Source |
+|---|---|---|---|
+| Static | — | 0 | `[[machines]]` in your config |
+| Tailscale | `tailscale` | 1 | `tailscale status --json` |
+| HTTP inventory | `http` | 2 | a JSON document you serve |
+| DNS TXT | `dns` | 3 | `bf1` TXT records |
+
+```toml
+[[discovery]]
+type = "tailscale"            # tailscale | dns | http
+# name = "tailscale"          # defaults to the type; needed for a second provider of one type
+interval = "30s"              # defaults to daemon.discovery_interval
+```
+
+## Refresh and expiry
+
+- Each provider refreshes every `interval`, so a new machine can take that long to appear. `bifrost discover`
+  refreshes every provider now.
+- A machine missing from successful refreshes is dropped after `max(TTL, 3 × interval)`, and its mount is
+  unmounted gracefully.
+- A provider that fails keeps serving its last good view, frozen, until it recovers. One that could not start at
+  all is retried every `reconcile_interval` and on the next reload or SIGHUP.
+- Invalid records are skipped one at a time, with a warning in the daemon log.
+
+`bifrost discover` prints each provider's state:
+
+```text
+PROVIDER   KIND       STATUS  MACHINES  LAST-OK
+static     static     ok      2         -
+tailscale  tailscale  ok      5         12s ago
+```
+
+## Static
+
+Machines in `[[machines]]` are reported by a built-in provider named `static`. They are the most trusted source
+and are allowed unless a global deny matches. See [Configuration](/bifrost/guides/configuration/#static-machines).
+
+## Tailscale
+
+```toml
+[[discovery]]
+type = "tailscale"
+
+[discovery.filter]
+include_tags = ["dev", "agent"]   # tags lose their "tag:" prefix
+
+[discovery.mount]
+user = "sami"
+```
+
+- Runs `tailscale status --json` with a 10 second timeout. It never runs `tailscale up`, `down` or `set`.
+- The binary comes from `$PATH` and the fixed directories, else on macOS
+  `/Applications/Tailscale.app/Contents/MacOS/Tailscale`.
+- **Id:** the first label of the MagicDNS name, else the lowercased hostname.
+- **Address:** the MagicDNS name when MagicDNS is on, else the first Tailscale IPv4 address.
+- **Tags** lose their `tag:` prefix. Metadata carries `os`, `hostname` and `dns_name`.
+- Your own node is never listed, and neither are other users' devices that appear only because you shared this
+  machine with them (`tailscale status` hides them too).
+- With no filter and no global allow, every peer is discover-only.
+
+## DNS TXT (`bf1`)
+
+```toml
+[[discovery]]
+type = "dns"
+name = "infra"
+domain = "infra.example.com"
+nameservers = ["10.0.0.2", "127.0.0.1:5353"]   # optional; default: the system resolver
+
+[discovery.filter]
+include_names = ["agent-*", "build-*"]
+
+[discovery.mount]
+user = "ubuntu"
+honor_hints = true
+```
+
+Publish one index record, then one record per node:
+
+```text
+_bifrost.infra.example.com.          TXT "v=bf1 nodes=agent-01,agent-02"
+_bifrost.agent-01.infra.example.com. TXT "v=bf1 host=10.0.0.5 port=22 user=sami tags=dev,agent path=/home/sami"
+_bifrost.agent-02.infra.example.com. TXT "v=bf1 tags=dev"
+```
+
+### Record format
+
+A record is space-separated `key=value` tokens, and `v=bf1` must come first. Records that don't start with
+`v=bf1` (SPF and friends) are ignored.
+
+| Key | Where | Value |
+|---|---|---|
+| `v` | both | `bf1`, first |
+| `nodes` | index | comma-separated node labels: `[a-z0-9-]`, no dots, 256 nodes at most |
+| `host` | node | connect target, hostname or IP. Default `<node>.<domain>` |
+| `port` | node | 1–65535 |
+| `user` | node | remote user, a hint used only with `honor_hints` |
+| `path` | node | remote path, a hint used only with `honor_hints` |
+| `tags` | node | comma-separated, at most 32 |
+| `id` | node | a native id, matched only by this provider's `include_ids` / `exclude_ids` |
+
+- **Identity is the node label** (`agent-01`), never `id=`. Labels have no dots, so an index can't send queries to
+  another domain. Every name is queried absolute, so search domains never apply.
+- A record over 2 KiB, a duplicate key, or any key that fails validation (say `host=-oProxyCommand=…`) rejects the
+  **whole node**. Two different bf1 records for one node are ambiguous, and the node is skipped.
+- Unknown keys, `driver=` included, are ignored.
+- Changes show up on the first refresh after the record's TTL (resolvers cache). Without `nameservers`, the
+  system resolver config is re-read on every refresh, so a network or VPN change is picked up.
+- DNSSEC is not checked, and the inline form with `host=` on the root record is not supported.
+
+## HTTP inventory
+
+```toml
+[[discovery]]
+type = "http"
+name = "inventory"
+url = "https://inventory.example.com/bifrost/v1/machines"
+headers = { Authorization = "Bearer ${BIFROST_INVENTORY_TOKEN}" }
+interval = "60s"
+
+[discovery.filter]
+include_cidrs = ["10.20.0.0/16"]
+include_metadata = { env = "dev" }
+```
+
+Bifröst sends `GET url` with your headers and `Accept: application/json`. Header values may use `${VAR}`, so
+secrets stay in the environment; they are never logged.
+
+### Response schema
+
+```json
+{
+  "machines": [
+    {
+      "name": "agent-01",
+      "id": "i-0abc",
+      "host": "agent-01.corp",
+      "addresses": ["10.20.0.4"],
+      "port": 22,
+      "online": true,
+      "user": "sami",
+      "path": "/home/sami",
+      "metadata": { "tags": ["dev", "agent"], "env": "dev" }
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes, else `id` | the machine id, lowercased |
+| `id` | no | native id, matched only by this provider's `include_ids` / `exclude_ids` |
+| `host` | one of `host` / `addresses` | connect target. When present, `addresses` is ignored, so CIDR rules see the real target |
+| `addresses` | one of `host` / `addresses` | hostnames or IPs; invalid entries are dropped |
+| `port` | no | SSH port |
+| `online` | no | `false` holds a pending mount until the machine is back |
+| `user`, `path` | no | hints, used only with `honor_hints` |
+| `metadata` | no | `tags` becomes the machine's tags; other scalars become strings; nested values are dropped |
+
+A `driver` field is ignored.
+
+### Limits
+
+- The URL must be `https://`, or `http://` only to `127.0.0.1`, `[::1]` or `localhost`.
+- Redirects are never followed, so your auth header can't leak to another host.
+- 10 second timeout, 1 MiB body, the first 1000 entries.
+- A non-2xx status marks the provider failed (for example `HTTP 401`) and keeps its last good view.
+- A bad entry is skipped on its own; the rest of the response still counts.
+
+<Aside type="caution">
+DNS and HTTP data is untrusted input. It can only ever become a validated name, host, user, path or port, and
+the more trusted providers always win for the machines they report. See the
+[security model](/bifrost/concepts/security/).
+</Aside>

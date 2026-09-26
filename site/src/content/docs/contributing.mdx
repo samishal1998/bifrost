@@ -1,0 +1,107 @@
+---
+title: Contributing
+description: Build Bifröst, run the checks and the end-to-end harness, cut a release, and work on these docs.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Bifröst is dual-licensed under MIT or Apache-2.0. Issues and pull requests go to
+[samishal1998/bifrost](https://github.com/samishal1998/bifrost).
+
+## Build
+
+You need Rust 1.89 or newer (edition 2024).
+
+```sh
+cargo build --workspace
+```
+
+The binaries are `bifrostd` (crate `bifrost-daemon`), `bifrost` (`bifrost-cli`) and `bifrost-tui`. The
+[architecture page](/bifrost/concepts/architecture/#components) lists what each crate holds.
+
+## The gate
+
+```sh
+scripts/check.sh
+```
+
+It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and
+`cargo test --workspace`. Every change should pass it.
+
+To check the macOS code from Linux:
+
+```sh
+rustup target add aarch64-apple-darwin
+cargo check --target aarch64-apple-darwin -p bifrost-core -p bifrost-config -p bifrost-mount -p bifrost-client -p bifrost-cli -p bifrost-tui
+cargo clippy --target aarch64-apple-darwin -p bifrost-core -p bifrost-config -p bifrost-mount -p bifrost-client -p bifrost-cli -p bifrost-tui -- -D warnings
+```
+
+`bifrostd` and the discovery crate need an Apple toolchain for that target.
+
+## End-to-end tests
+
+```sh
+tests/e2e/run.sh m1                                  # milestone 1: p04 p05 p06 psec p13a
+tests/e2e/run.sh all                                 # + p07 p08 p09 p10 p12 p13
+tests/e2e/run.sh p08_dns p10_http p13_hardening      # only these phases, in this order
+```
+
+- **Needs** docker (a throwaway OpenSSH container on `127.0.0.1:2222`, CoreDNS on `127.0.0.1:5353`), jq, curl,
+  pgrep, sshfs, rclone, fusermount3, ssh-keygen and ssh-keyscan, plus python3 and dig for `all`.
+- **Isolated:** everything runs in a `mktemp -d` scratch directory with its own keys, `known_hosts`, socket,
+  state and mount root. Your `~/.ssh` and `~/machines` are never touched.
+- **Unset `TMPDIR`:** the socket path must fit in 103 bytes.
+- **One run at a time**, host-wide. A second run exits 2 with "another e2e run is active". Wait and retry; don't
+  delete the lock.
+- **Scratch directories are kept**, one per run, never deleted automatically, because that could recurse into a
+  mount that failed to detach. Remove them yourself once nothing is mounted there.
+- **Phase files** (`tests/e2e/pNN_*.sh`) define `check_<p>`, and optionally `setup_<p>` and `config_<p>` (a TOML
+  fragment). `run.sh` lists them explicitly.
+- **Real mount tests** in the mount crate run against the same container:
+  `cargo test -p bifrost-mount -- --ignored` (the harness exports `BIFROST_E2E_SSH`).
+
+<Aside type="caution" title="p07 uses your real tailnet">
+Phase p07 is opt-in (`E2E_TAILSCALE=1`). It runs discovery against your live tailnet and asserts that nothing is
+mounted. Its scratch directory then holds real tailnet names: delete it, and never commit anything from it.
+</Aside>
+
+## Releasing
+
+Releases are built by GitHub Actions when a `v*` tag is pushed.
+
+<Steps>
+
+1. Set the new version in the workspace `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, and commit.
+
+2. Tag the commit and push the tag:
+
+   ```sh
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+3. The release workflow builds `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+   `x86_64-apple-darwin` and `aarch64-apple-darwin`, packs each as `bifrost-<target>.tar.gz`, writes
+   `SHA256SUMS`, and publishes a GitHub release with generated notes.
+
+</Steps>
+
+Asset names carry no version, so `https://github.com/samishal1998/bifrost/releases/latest/download/<asset>`
+always points at the newest release, and the [install script](/bifrost/installation/) uses exactly that. To test
+the build without publishing, run the release workflow by hand with `dry_run` checked: it uploads the tarballs as
+workflow artifacts only.
+
+## These docs
+
+The site lives in `site/`: [Astro Starlight](https://starlight.astro.build), deployed to GitHub Pages by the
+pages workflow on every push to `main` that touches it.
+
+```sh
+cd site
+npm ci
+npm run dev        # http://localhost:4321/bifrost/
+npm run build      # static site in site/dist
+```
+
+The pages workflow copies the repository's `install.sh` into the site root, so the one-liner URL always serves
+the script from `main`. Brand assets come from `brand/`; the copies used by the site are in `site/src/assets`.
