@@ -141,22 +141,19 @@ async fn run(o: Opts, deps: Deps, stop: impl Future<Output = ()> + Send + 'stati
         code
     };
     // 2. state dir and <state>/logs (B11), 0700 when created (A21)
-    let dirs =
-        create_dirs(&o.state_dir).and_then(|e| Ok((e, create_dirs(&o.state_dir.join("logs"))?)));
-    let state_existed = match dirs {
-        Ok((e, _)) => e,
-        Err(e) => return fail(1, format!("{}: {e}", o.state_dir.display())),
-    };
-    // 3. one daemon per state dir; then the ownership check
+    let logs = o.state_dir.join("logs");
+    if let Err(e) = create_dirs(&o.state_dir).and_then(|_| create_dirs(&logs)) {
+        return fail(1, format!("{}: {e}", o.state_dir.display()));
+    }
+    // 3. one daemon per state dir; then the ownership check on both (one created here passes: ours, 0700). Another
+    // user who can write the state dir could swap logs/ for theirs holding `<id>.log -> any file of ours`: the
+    // child-log open (create+truncate) would clobber it; state.json and rclone's cache dir live there too
     let (lock, uid) = match lock(&o.state_dir) {
         Ok(l) => l,
         Err(e) => return fail(1, e),
     };
-    if state_existed && owner(&o.state_dir) != Some(uid) {
-        return fail(
-            1,
-            format!("{} is not owned by this user", o.state_dir.display()),
-        );
+    if let Some(d) = [&o.state_dir, &logs].into_iter().find(|d| !private(d, uid)) {
+        return fail(1, format!("{} {PRIVATE}", d.display()));
     }
     // 4. config: invalid ⇒ exit 2, never a daemon that would unmount everything
     let (cfg, loaded) = match config(&o.config) {
@@ -172,14 +169,10 @@ async fn run(o: Opts, deps: Deps, stop: impl Future<Output = ()> + Send + 'stati
         Err(e) => return fail(1, format!("mount.root {}: {e}", cfg.root.display())),
     };
     // another user who can write the root could swap <root>/<id> for a symlink before the mount, or mount there
-    // first with our marker (§11). 0o002, not 0o022: a umask-002 (user private group) ~/machines is 0775
+    // first with our marker (§11)
     // ponytail: the root's ancestors and a group shared with other users aren't checked (as for the state dir); walk the ancestors and test 0o020 if shared roots matter
-    match std::fs::metadata(&root) {
-        Ok(m) if m.uid() == uid && m.mode() & 0o002 == 0 => {}
-        _ => {
-            let why = "must be owned by this user and not world-writable";
-            return fail(1, format!("mount.root {} {why}", root.display()));
-        }
+    if !private(&root, uid) {
+        return fail(1, format!("mount.root {} {PRIVATE}", root.display()));
     }
     // 6–7. state.json, then adoption of our marker mounts directly under the root
     let st = state::read(&o.state_dir);
@@ -277,8 +270,12 @@ fn create_dirs(p: &Path) -> io::Result<bool> {
     Ok(existed)
 }
 
-fn owner(p: &Path) -> Option<u32> {
-    std::fs::metadata(p).ok().map(|m| m.uid())
+const PRIVATE: &str = "must be owned by this user and not world-writable";
+
+/// The §8 directory check: owned by the lock's uid and not world-writable (`0o002`, not `0o022`: a umask-002 (user
+/// private group) dir is 0775).
+fn private(p: &Path, uid: u32) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.uid() == uid && m.mode() & 0o002 == 0)
 }
 
 /// Step 3: one daemon per state dir; the lock goes when the process does (a crash included). Returns the lock
@@ -323,8 +320,8 @@ fn bind_socket(path: &Path, uid: u32) -> Result<UnixListener, String> {
     let parent = (path.parent())
         .filter(|p| path.is_absolute() && !p.as_os_str().is_empty())
         .ok_or_else(|| format!("socket path must be absolute: {}", path.display()))?;
-    if create_dirs(parent).map_err(at)? && owner(parent) != Some(uid) {
-        return Err(format!("{} is not owned by this user", parent.display()));
+    if create_dirs(parent).map_err(at)? && !private(parent, uid) {
+        return Err(format!("{} {PRIVATE}", parent.display()));
     }
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
@@ -473,6 +470,39 @@ mod tests {
         assert_eq!(d.await.ok(), Some(1));
         assert!(r.calls().is_empty());
         assert!(!r.dir.join("s.sock").exists());
+    }
+
+    #[tokio::test]
+    async fn world_writable_state_dirs_refused() {
+        let r = rig("state-owner");
+        let config = r.dir.join("config.toml");
+        std::fs::write(&config, r.text(&r.root, RECON, &machine("a"))).unwrap();
+        let (state, logs) = (r.dir.join("state"), r.dir.join("state/logs"));
+        // another local user could swap logs/ for their own dir and plant <id>.log -> a victim file (truncated on mount)
+        for open in [&state, &logs] {
+            std::fs::set_permissions(&state, Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(open, Permissions::from_mode(0o777)).unwrap();
+            let o = Opts {
+                config: config.clone(),
+                state_dir: state.clone(),
+                socket: r.dir.join("s.sock"),
+            };
+            let code = tokio::time::timeout(
+                Duration::from_secs(5),
+                run(o, r.deps(), std::future::pending()),
+            );
+            assert_eq!(code.await.ok(), Some(1), "{}", open.display());
+            assert!(r.calls().is_empty());
+            assert!(!r.dir.join("s.sock").exists());
+        }
+        // a world-writable socket parent, pre-existing and ours, is refused too
+        std::fs::set_permissions(&logs, Permissions::from_mode(0o700)).unwrap();
+        let (_lock, uid) = lock(&state).unwrap();
+        let run = r.dir.join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, Permissions::from_mode(0o777)).unwrap();
+        assert!(bind_socket(&run.join("b.sock"), uid).is_err());
+        assert!(!run.join("b.sock").exists());
     }
 
     /// Runs the whole daemon (startup §8 steps 2–10) on the rig's config, state dir and `sock`.

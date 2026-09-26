@@ -1135,19 +1135,33 @@ impl Actor {
             })
             .collect();
         // ponytail: provider warnings (skipped records) go only to the log, invisible from the CLI and TUI; `warnings` in ProviderDto
-        let providers = (self.providers.values())
-            .map(|p| ProviderDto {
-                name: p.cfg.name.clone(),
-                kind: p.cfg.kind.clone(),
-                machines: (self.machines.iter())
-                    .filter(|m| m.observed.iter().any(|o| o.source.provider == p.cfg.name))
-                    .count(),
-                refreshes: p.refreshes,
-                last_ok_secs_ago: p
-                    .last_ok
-                    .map(|t| now.saturating_duration_since(t).as_secs()),
-                last_error: p.last_error.clone(),
-            })
+        let seen = |name: &str| {
+            (self.machines.iter())
+                .filter(|m| m.observed.iter().any(|o| o.source.provider == name))
+                .count()
+        };
+        // static has no task (§15 #2) but is a row, first (§9 `providers static ok (2) · …`); "static" is reserved
+        let static_row = ProviderDto {
+            name: "static".into(),
+            kind: "static".into(),
+            machines: seen("static"),
+            refreshes: 0,
+            last_ok_secs_ago: None,
+            last_error: None,
+        };
+        let providers = std::iter::once(static_row)
+            .chain(self.providers.values().map(|p| {
+                ProviderDto {
+                    name: p.cfg.name.clone(),
+                    kind: p.cfg.kind.clone(),
+                    machines: seen(&p.cfg.name),
+                    refreshes: p.refreshes,
+                    last_ok_secs_ago: p
+                        .last_ok
+                        .map(|t| now.saturating_duration_since(t).as_secs()),
+                    last_error: p.last_error.clone(),
+                }
+            }))
             .collect();
         // every built driver, from the first snapshot on: "probing" until its first probe answers (S3 sign-off 2b)
         let probing = DriverAvailability::Unavailable("probing".into());
@@ -1479,6 +1493,12 @@ pub(crate) mod tests {
             .await;
         assert!(s.ready);
         assert_eq!(sorted(r.calls()), ["mount a", "mount b"]);
+        // static is a provider row too (§9 `providers static ok (2)`), always first
+        let p: Vec<_> = (s.providers.iter())
+            .map(|p| (p.name.as_str(), p.kind.as_str(), p.machines, p.refreshes))
+            .collect();
+        assert_eq!(p, [("static", "static", 2, 0)]);
+        assert!(s.providers[0].last_error.is_none() && s.providers[0].last_ok_secs_ago.is_none());
         h.send(Msg::Tick(Tick::Health));
         h.send(Msg::Tick(Tick::Fallback));
         let plan = h.reconcile().await;
@@ -1507,7 +1527,7 @@ pub(crate) mod tests {
         let mut h = r.start(r.cfg(RECON, FAKE_ALL), true, &[], &["old"]);
         let s = h
             .until("provider failed, old warming up", |s| {
-                s.providers.first().is_some_and(|p| p.last_error.is_some())
+                s.providers.get(1).is_some_and(|p| p.last_error.is_some())
                     && mount(s, "old").is_some_and(|m| m.action == "waiting (warming up)")
             })
             .await;
@@ -1515,7 +1535,7 @@ pub(crate) mod tests {
         // A18: an empty Ok is not a report
         r.set_disc(Ok(vec![]));
         h.send(Msg::Api(ApiCmd::Discover));
-        let s = h.until("empty ok", |s| s.providers[0].refreshes == 2).await;
+        let s = h.until("empty ok", |s| s.providers[1].refreshes == 2).await;
         assert!(!s.ready);
         assert_eq!(mount(&s, "old").unwrap().action, "waiting (warming up)");
         assert!(r.calls().is_empty());
@@ -1548,9 +1568,7 @@ pub(crate) mod tests {
         // the file appears: the grace clock starts now; the provider never reports, so only grace makes it ready
         let loaded = Instant::now();
         assert!(h.reload(r.cfg(grace1, FAKE)).await.ok);
-        let s = h
-            .until("provider listed", |s| !s.providers.is_empty())
-            .await;
+        let s = h.until("provider listed", |s| s.providers.len() == 2).await;
         assert!(!s.ready);
         h.until("ready", |s| s.ready).await;
         assert!(loaded.elapsed() >= Duration::from_millis(900));
@@ -2040,9 +2058,9 @@ pub(crate) mod tests {
         );
         assert_eq!(r.builds.load(SeqCst), 2);
         let s = h
-            .until("respawned", |s| s.providers[0].last_error.is_some())
+            .until("respawned", |s| s.providers[1].last_error.is_some())
             .await;
-        assert_eq!((s.machines.len(), s.providers[0].machines), (1, 1));
+        assert_eq!((s.machines.len(), s.providers[1].machines), (1, 1));
     }
 
     #[tokio::test]
@@ -2051,7 +2069,7 @@ pub(crate) mod tests {
         r.fail_build.store(true, SeqCst);
         r.set_disc(Ok(vec![obs("m1", "10.0.0.9")]));
         let mut h = r.start(r.cfg(RECON, FAKE), true, &[], &[]);
-        h.until("build failed", |s| s.providers[0].last_error.is_some())
+        h.until("build failed", |s| s.providers[1].last_error.is_some())
             .await;
         // B11: no task; an unchanged reload (SIGHUP, `bifrost config reload`) retries the build
         r.fail_build.store(false, SeqCst);
@@ -2077,7 +2095,7 @@ pub(crate) mod tests {
         // so no refresh ever marks it failing; its view must freeze like a failing refresh's, not age out
         r.fail_build.store(true, SeqCst);
         assert!(h.reload(every(101)).await.ok);
-        h.until("build failed", |s| s.providers[0].last_error.is_some())
+        h.until("build failed", |s| s.providers[1].last_error.is_some())
             .await;
         tokio::time::sleep(Duration::from_millis(500)).await;
         h.reconcile().await; // expire() runs only in a pass
@@ -2093,7 +2111,7 @@ pub(crate) mod tests {
         r.fail_build.store(true, SeqCst);
         r.set_disc(Ok(vec![obs("m1", "10.0.0.9")]));
         let mut h = r.start(r.cfg(RECON, FAKE), true, &[], &[]);
-        h.until("build failed", |s| s.providers[0].last_error.is_some())
+        h.until("build failed", |s| s.providers[1].last_error.is_some())
             .await;
         // nobody reloads: the fallback tick (every reconcile_interval) retries the build on its own
         r.fail_build.store(false, SeqCst);
