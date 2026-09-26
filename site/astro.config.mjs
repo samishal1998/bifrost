@@ -21,7 +21,10 @@ export default defineConfig({
 			social: [{ icon: 'github', label: 'GitHub', href: repo }],
 			editLink: { baseUrl: `${repo}/edit/main/site/` },
 			customCss: ['./src/styles/custom.css'],
-			components: { Hero: './src/components/Hero.astro' },
+			components: {
+				Hero: './src/components/Hero.astro',
+				SiteTitle: './src/components/SiteTitle.astro',
+			},
 			sidebar: [
 				{ label: 'Getting started', items: ['installation', 'quickstart'] },
 				{
