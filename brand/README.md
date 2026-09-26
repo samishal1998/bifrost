@@ -1,8 +1,6 @@
-# Bifröst asset suite
+# Bifröst brand assets
 
-This bundle contains **raw separate files** generated to match the approved attached board as closely as possible, plus the requested **monochrome variants**.
-
-## Contents
+Palette: Nordic Night `#0B1220`, Aurora Teal `#2DD4BF`, Glacial Blue `#60A5FA`, Frost Glass `#E5F0FF`, Stone `#94A3B8`.
 
 - `01_logo/`
   - `primary_logo_color.png`
@@ -30,15 +28,3 @@ This bundle contains **raw separate files** generated to match the approved atta
 
 - `reference/`
   - `approved_brand_board.png`
-
-## Notes
-
-- These are **separate standalone assets**, not crops from the board.
-- Most logo/glyph/UI icon assets use transparent backgrounds.
-- App icons and the hero image use solid backgrounds.
-- If you want, the next pass can create:
-  - SVG-like ultra-flat variants
-  - favicon sizes / export set
-  - social banners
-  - CLI splash / terminal-friendly monochrome marks
-  - stricter geometry matching for any asset you want revised
