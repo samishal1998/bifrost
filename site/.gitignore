@@ -1,0 +1,14 @@
+# build output
+dist/
+# generated types
+.astro/
+# dependencies
+node_modules/
+# copied from the repo-root install.sh by the pages workflow
+public/install.sh
+# logs
+npm-debug.log*
+# local secrets and OS clutter
+.env
+.env.*
+.DS_Store

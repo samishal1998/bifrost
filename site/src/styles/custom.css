@@ -1,0 +1,113 @@
+/* Bifröst palette on Starlight's variables.
+   Nordic Night #0B1220 · Aurora Teal #2DD4BF · Glacial Blue #60A5FA · Frost Glass #E5F0FF · Stone #94A3B8
+   Every text/background pair below is ≥ 4.5:1 (WCAG AA). */
+
+:root {
+	--sl-color-white: #f4f8ff;
+	--sl-color-gray-1: #e5f0ff; /* Frost Glass */
+	--sl-color-gray-2: #c4d0e2;
+	--sl-color-gray-3: #94a3b8; /* Stone */
+	--sl-color-gray-4: #64748b;
+	--sl-color-gray-5: #1c2840;
+	--sl-color-gray-6: #111a2e;
+	--sl-color-black: #0b1220; /* Nordic Night */
+
+	--sl-color-accent-low: #0b3b3b;
+	--sl-color-accent: #2dd4bf; /* Aurora Teal */
+	--sl-color-accent-high: #99f6e4;
+	--sl-color-text-accent: var(--sl-color-accent);
+	--sl-color-bg-accent: var(--sl-color-accent);
+	--sl-color-text-invert: var(--sl-color-black);
+
+	/* asides: note = Glacial Blue, tip = Aurora Teal; caution/danger use the TUI's amber and rose */
+	--sl-hue-blue: 213;
+	--sl-color-blue-low: #0f2748;
+	--sl-color-blue: #60a5fa; /* Glacial Blue */
+	--sl-color-blue-high: #bfdbfe;
+	--sl-color-purple-low: #0b3b3b;
+	--sl-color-purple: #2dd4bf;
+	--sl-color-purple-high: #99f6e4;
+	--sl-color-orange-low: #3d2e0a;
+	--sl-color-orange: #fbbf24;
+	--sl-color-orange-high: #fde68a;
+	--sl-color-red-low: #3f1519;
+	--sl-color-red: #f87171;
+	--sl-color-red-high: #fecaca;
+
+	--bf-frame: rgb(229 240 255 / 0.14);
+	--bf-glow: rgb(45 212 191 / 0.35);
+}
+
+:root[data-theme='light'] {
+	--sl-color-white: #0b1220;
+	--sl-color-gray-1: #1e293b;
+	--sl-color-gray-2: #334155;
+	--sl-color-gray-3: #475569;
+	--sl-color-gray-4: #64748b;
+	--sl-color-gray-5: #cbd5e1;
+	--sl-color-gray-6: #e5f0ff; /* Frost Glass */
+	--sl-color-gray-7: #edf4ff;
+	--sl-color-black: #f8fbff;
+
+	--sl-color-accent-low: #ccfbf1;
+	--sl-color-accent: #0f766e;
+	--sl-color-accent-high: #115e59;
+	--sl-color-text-accent: var(--sl-color-accent);
+	--sl-color-bg-accent: var(--sl-color-accent);
+	--sl-color-text-invert: #ffffff;
+
+	--sl-color-blue-low: #dbeafe;
+	--sl-color-blue: #3b82f6;
+	--sl-color-blue-high: #1d4ed8;
+	--sl-color-purple-low: #ccfbf1;
+	--sl-color-purple: #14b8a6;
+	--sl-color-purple-high: #115e59;
+	--sl-color-orange-low: #fef3c7;
+	--sl-color-orange: #f59e0b;
+	--sl-color-orange-high: #92400e;
+	--sl-color-red-low: #fee2e2;
+	--sl-color-red: #ef4444;
+	--sl-color-red-high: #991b1b;
+
+	--bf-frame: rgb(11 18 32 / 0.12);
+	--bf-glow: rgb(11 18 32 / 0.35);
+}
+
+/* One aurora line under the header: teal into glacial blue, never a rainbow. */
+.header::after {
+	content: '';
+	position: absolute;
+	inset: auto 0 -1px;
+	height: 1px;
+	background: linear-gradient(90deg, transparent, #2dd4bf 30%, #60a5fa 70%, transparent);
+	opacity: 0.7;
+}
+
+/* Landing page: the four pillars, drawn with the brand's line icons tinted to the theme. */
+.bf-pillars {
+	list-style: none;
+	padding: 0;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+	gap: 2rem 1.5rem;
+	margin-block: 1rem;
+	text-align: center;
+}
+.bf-pillar strong {
+	display: block;
+	margin-top: 0.75rem;
+	font-size: var(--sl-text-lg);
+	color: var(--sl-color-white);
+}
+.bf-pillar p {
+	margin: 0.25rem 0 0;
+	color: var(--sl-color-gray-3);
+}
+.bf-icon {
+	display: block;
+	width: 3.5rem;
+	height: 3.5rem;
+	margin-inline: auto;
+	background: var(--sl-color-accent);
+	mask: var(--icon) center / contain no-repeat;
+}

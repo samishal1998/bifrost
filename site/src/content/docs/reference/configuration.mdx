@@ -1,0 +1,216 @@
+---
+title: Configuration reference
+description: Every key in config.toml, with its default and its rules, plus a complete example.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The file is `$BIFROST_CONFIG`, else `~/.config/bifrost/config.toml`. Unknown keys are errors. The
+[configuration guide](/bifrost/guides/configuration/) explains how the pieces fit.
+
+## Top level
+
+| Key | Default | Rules |
+|---|---|---|
+| `version` | `1` | Only `1` is accepted |
+
+## `[mount]`
+
+| Key | Default | Rules |
+|---|---|---|
+| `root` | `"~/machines"` | Expanded (`~`, `$VAR`). Absolute; not `/`, not `$HOME`, no `..`. Must be yours and not world-writable. Changing it needs a restart |
+| `default_driver` | `"auto"` | `auto`, `sshfs`, `rclone` or `rclone-nfs` |
+| `auto_order` | Linux `["sshfs", "rclone"]`; macOS `["rclone-nfs", "rclone", "sshfs"]` | Non-empty, known drivers, no duplicates |
+| `ssh_config` | none | Expanded. Absolute, must exist, no `"`. Passed to ssh, sshfs and rclone as `-F` |
+| `vfs_cache_mode` | `"writes"` | rclone only: `off`, `minimal`, `writes` or `full` |
+
+## `[daemon]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `discovery_interval` | `"30s"` | Default refresh interval for each provider |
+| `health_interval` | `"15s"` | How often each mounted path is probed |
+| `reconcile_interval` | `"60s"` | Slow fallback pass; also re-probes drivers and retries providers that failed to start |
+| `mount_timeout` | `"30s"` | How long a mount may take to become ready. At most `5m` |
+
+## `[reconciliation]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `offline_grace_period` | `"5m"` | How long a degraded mount may hang before a forced lazy detach. Also caps the startup warm-up |
+| `retry_initial` | `"2s"` | First retry delay after a failure |
+| `retry_max` | `"1m"` | Longest retry delay. At least `retry_initial` |
+
+Durations are a whole number and one unit: `ms`, `s`, `m` or `h`. Every duration is at least 1s and at most
+366 days.
+
+## `[policy.allow]` and `[policy.deny]`
+
+| Key | Type | Matches |
+|---|---|---|
+| `ids` | list of names | The machine id (never a provider's native id) |
+| `names` | list of globs | The machine id, with `*` and `?` |
+| `cidrs` | list of CIDRs | An IP-literal address inside a range |
+| `tags` | list | Any of the machine's tags |
+| `providers` | list | A provider name or kind that must exist |
+| `metadata` | table of strings | Allow: every pair equals. Deny: any pair equals |
+
+Allow rules AND across keys and OR within a key. Any single deny match denies. See
+[Policy and filtering](/bifrost/guides/policy/).
+
+## `[[discovery]]`
+
+| Key | Default | Rules |
+|---|---|---|
+| `type` | required | `tailscale`, `dns` or `http` |
+| `name` | the type | A lowercase name, unique. Needed for a second provider of one type. `static` is reserved |
+| `interval` | `daemon.discovery_interval` | Refresh interval |
+| `domain` | required for `dns` | A hostname, not an IP. `dns` only |
+| `nameservers` | system resolver | `"ip"` (port 53) or `"ip:port"`. `dns` only |
+| `url` | required for `http` | Expanded. `https://`, or `http://` only to `127.0.0.1`, `[::1]` or `localhost`. `http` only |
+| `headers` | none | Table of header name to value. Values are expanded and may not contain CR, LF or NUL. `http` only |
+
+### `[discovery.filter]`
+
+`include_ids`, `include_names`, `include_cidrs`, `include_tags`, `include_metadata`, and the same five with
+`exclude_`. Includes AND across kinds and OR within a kind; an exclude drops this provider's report on any match.
+`*_ids` also match this provider's native ids.
+
+### `[discovery.mount]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `user` | none | Remote user. None lets your ssh config or local user decide |
+| `remote` | `"~"` | Remote path: `~`, `~/rel`, `/` or `/abs` |
+| `driver` | `mount.default_driver` | `auto`, `sshfs`, `rclone` or `rclone-nfs` |
+| `read_only` | `false` | Mount read-only |
+| `honor_hints` | `false` | Let a record's `user=` and `path=` override `user` and `remote`, after validation |
+
+## `[[machines]]`
+
+| Key | Default | Rules |
+|---|---|---|
+| `name` | required | Lowercase `[a-z0-9][a-z0-9._-]{0,62}`, unique. The machine id |
+| `host` | required | Hostname or IP literal |
+| `port` | none (ssh decides) | 1–65535 |
+| `user` | none | `[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}` |
+| `tags` | `[]` | Tags for policy |
+| `metadata` | `{}` | String pairs for policy |
+| `remote` | — | Short form: the one remote path. Mount id = `name` |
+| `driver`, `read_only` | `mount.default_driver`, `false` | Only together with `remote` |
+
+A machine has exactly one of `remote` or `[[machines.mounts]]`.
+
+### `[[machines.mounts]]`
+
+| Key | Default | Rules |
+|---|---|---|
+| `remote` | required | `~`, `~/rel`, `/` or `/abs`; no `..`, `:` or control characters |
+| `local` | the machine name, only if it has one mount | The mount id and folder name under the root. Unique across all static mounts |
+| `driver` | `mount.default_driver` | As above |
+| `read_only` | `false` | Mount read-only |
+
+## Complete example
+
+To run it as is, `~/.config/bifrost/ssh_config` must exist and `BIFROST_INVENTORY_TOKEN` must be set.
+
+```toml title="~/.config/bifrost/config.toml"
+version = 1                                   # optional; only 1 accepted
+
+[mount]
+root = "~/machines"                           # ~ and $VAR expanded; absolute; not "/", not $HOME, no ".."; yours, not world-writable
+default_driver = "auto"                       # auto | sshfs | rclone | rclone-nfs
+auto_order = ["sshfs", "rclone"]              # default: linux [sshfs, rclone]; macos [rclone-nfs, rclone, sshfs]
+ssh_config = "~/.config/bifrost/ssh_config"   # optional → `-F` for ssh/sshfs/rclone-ssh; must exist; no '"'
+vfs_cache_mode = "writes"                     # rclone: off | minimal | writes | full
+
+[daemon]
+discovery_interval = "30s"                    # default per-provider refresh
+health_interval = "15s"
+reconcile_interval = "60s"                    # slow fallback
+mount_timeout = "30s"
+
+[reconciliation]
+offline_grace_period = "5m"                   # also caps startup warm-up
+retry_initial = "2s"
+retry_max = "1m"
+
+[policy.allow]                                # global explicit allow: AND across kinds, OR within a kind
+ids = ["agent-07"]
+
+[policy.deny]                                 # global deny: any primitive; beats everything, static included
+names = ["prod-*"]
+cidrs = ["10.99.0.0/16"]
+tags = ["prod"]
+providers = []
+metadata = { env = "production" }
+
+[[discovery]]
+type = "tailscale"                            # tailscale | dns | http
+# name = "tailscale"                          # default = type; unique; "static" reserved
+interval = "30s"                              # default daemon.discovery_interval
+
+[discovery.filter]
+include_tags = ["dev", "agent"]               # provider strips "tag:"
+exclude_names = ["*-old"]
+
+[discovery.mount]                             # template for allowed machines of THIS provider
+user = "sami"                                 # default: none (ssh_config / local user decides)
+remote = "~"                                  # default "~" (remote login dir)
+driver = "auto"                               # default mount.default_driver
+read_only = false
+honor_hints = false                           # true ⇒ record user=/path= win (validated); there is no driver hint
+
+[[discovery]]
+type = "dns"
+name = "infra"
+domain = "infra.example.com"
+nameservers = ["10.0.0.2", "127.0.0.1:5353"]  # optional "ip" | "ip:port"; default: system resolver (re-read each refresh)
+
+[discovery.filter]
+include_names = ["agent-*", "build-*"]
+
+[discovery.mount]
+user = "ubuntu"
+honor_hints = true
+
+[[discovery]]
+type = "http"
+name = "inventory"
+url = "https://inventory.example.com/bifrost/v1/machines"  # https, or http:// only to 127.0.0.1 / [::1] / localhost
+headers = { Authorization = "Bearer ${BIFROST_INVENTORY_TOKEN}" }
+interval = "60s"
+
+[discovery.filter]
+include_cidrs = ["10.20.0.0/16"]
+include_metadata = { env = "dev" }
+
+[[machines]]
+name = "build"
+host = "10.0.0.18"
+user = "sami"
+port = 22
+tags = ["ci"]
+metadata = { env = "ci" }
+
+[[machines.mounts]]
+remote = "/home/sami"
+local = "build"                               # mount id = local; it shadows the machine id for bifrost mount/unmount
+driver = "sshfs"
+
+[[machines.mounts]]
+remote = "/srv/artifacts"
+local = "build-artifacts"
+driver = "rclone"
+read_only = true
+
+[[machines]]                                  # shorthand: one mount, local = name
+name = "agent-01"
+host = "agent-01"
+user = "sami"
+remote = "/home/sami"                         # optional: driver, read_only
+```
+
+<Aside type="tip">
+`bifrost config check path/to/config.toml` validates a file without touching the daemon.
+</Aside>

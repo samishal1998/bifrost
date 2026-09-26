@@ -1,0 +1,138 @@
+---
+title: Configuration
+description: Where the config lives, how machines become mounts, and how edits are picked up.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+One TOML file drives everything: `$BIFROST_CONFIG`, else `~/.config/bifrost/config.toml`, on Linux and macOS.
+Every key is listed in the [configuration reference](/bifrost/reference/configuration/).
+
+## The shape of the file
+
+```toml
+version = 1                 # optional; only 1 is accepted
+
+[mount]                     # the mount root and driver defaults
+[daemon]                    # refresh, health and reconcile intervals, mount timeout
+[reconciliation]            # offline grace period and retry backoff
+[policy.allow]              # global allow rules
+[policy.deny]               # global deny rules
+
+[[discovery]]               # one table per provider: tailscale, dns or http
+[discovery.filter]          #   which of its machines to allow or drop
+[discovery.mount]           #   how to mount its allowed machines
+
+[[machines]]                # static machines, always allowed unless denied
+[[machines.mounts]]         #   more than one mount per machine
+```
+
+Every table is optional. An empty file is valid: root `~/machines`, no machines.
+
+## Static machines
+
+The short form mounts one remote path. The mount id is the machine name:
+
+```toml
+[[machines]]
+name = "agent-01"
+host = "agent-01"           # hostname or IP literal
+user = "sami"               # optional: ssh_config or your local user decides
+remote = "/home/sami"       # ~, ~/rel, / or /abs
+# port, tags, metadata, driver and read_only are optional
+```
+
+For several mounts, list them. Each one needs a `local` name, which becomes its id:
+
+```toml
+[[machines]]
+name = "build"
+host = "10.0.0.18"
+user = "sami"
+
+[[machines.mounts]]
+remote = "/home/sami"
+local = "build"
+driver = "sshfs"
+
+[[machines.mounts]]
+remote = "/srv/artifacts"
+local = "build-artifacts"
+driver = "rclone"
+read_only = true
+```
+
+A machine has either `remote` or `[[machines.mounts]]`, never both. `local` may be left out only when the machine
+has exactly one mount.
+
+Every mount lives at `<root>/<id>`, so the config above gives `~/machines/build` and
+`~/machines/build-artifacts`.
+
+## Discovered machines
+
+A machine found by a provider gets one mount, with the machine id as its mount id. Its provider's
+`[discovery.mount]` table says how:
+
+```toml
+[[discovery]]
+type = "tailscale"
+
+[discovery.filter]
+include_tags = ["dev"]      # without an include or allow rule, nothing is mounted
+
+[discovery.mount]
+user = "sami"
+remote = "~"                # the default: the remote login directory
+driver = "auto"
+read_only = false
+honor_hints = false         # true lets a DNS or HTTP record's user= and path= win
+```
+
+Discovery alone never mounts anything. See [Policy and filtering](/bifrost/guides/policy/) for the rules and
+[Discovery providers](/bifrost/guides/discovery/) for each provider.
+
+If a discovered id collides with a static mount's `local`, the static mount wins and the conflict shows in
+`bifrost status`.
+
+## Names and values
+
+- **Names** (machine names, `local`, provider names) are lowercase: `[a-z0-9][a-z0-9._-]{0,62}`. Uppercase gets a
+  hint: `machines[0].name: "Agent-01": use lowercase ("agent-01")`.
+- **Durations** are a whole number and one unit (`ms`, `s`, `m` or `h`), such as `1500ms`, `30s`, `5m` or `1h`.
+  Every duration is at least 1s, `retry_initial` is at most `retry_max`, and `mount_timeout` is at most 5m.
+- **Expansion** of `~`, `$VAR` and `${VAR}` happens only in `mount.root`, `mount.ssh_config`, `discovery.url` and
+  header values. `$$` is a literal `$`. An undefined variable is an error, never an empty string. Names, hosts and
+  remote paths are never expanded; in a remote path `~` means the remote home.
+- **Unknown keys are errors**, so a typo, or a `password = …` line, is rejected.
+
+## Check before you apply
+
+```console
+$ bifrost config check
+ok: /home/sami/.config/bifrost/config.toml (3 machines, 2 providers, 4 mounts, root /home/sami/machines)
+
+$ bifrost config check bad.toml
+error: daemon.health_interval: invalid duration "1.5s": must be <n>ms|s|m|h, > 0 and <= 366d
+error: discovery[0].domain: required for type = "dns"
+error: machines[0].host: invalid host "-oProxyCommand=x": not an IP literal or hostname
+error: machines[0].name: "Agent-01": use lowercase ("agent-01")
+```
+
+`config check` needs no daemon. It prints every error, sorted, the same bytes every time, and exits 1 when there
+is one.
+
+## Reloading
+
+The daemon picks up edits by itself: it polls the file every 2 seconds and applies a change once two reads agree,
+so within 2–4 seconds. To apply at once, run `bifrost config reload` or send `SIGHUP`.
+
+- **An invalid edit** keeps the running config. The errors show in `bifrost status` and in the TUI.
+- **A file emptied at runtime** (a `>` redirect still being written) also keeps the running config. Only an
+  explicit reload applies an empty file.
+- **`mount.root` changes** need a daemon restart.
+- **Other changes** remount only what changed, gracefully.
+
+<Aside type="caution" title="At startup">
+A missing or empty config file starts an empty default (root `~/machines`, no machines) with a warning. An
+**invalid** config stops `bifrostd` from starting (exit 2), so a typo can never make it unmount everything.
+</Aside>

@@ -1,0 +1,138 @@
+---
+title: Daemon API
+description: The HTTP/JSON API bifrostd serves on its Unix socket, and the server-sent event stream.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`bifrostd` serves a small HTTP API on its Unix socket. The CLI and the TUI use nothing else, so anything they do,
+a script can do too.
+
+```sh
+sock="${BIFROST_SOCKET:-$XDG_RUNTIME_DIR/bifrost/bifrost.sock}"
+curl -s --unix-socket "$sock" http://bifrost/v1/status | jq .
+```
+
+The socket is always mode `0600` and its directory `0700` when the daemon creates it, so only your user can
+connect. The host name in the URL is ignored.
+
+## Routes
+
+Every `POST` takes a JSON body: send `{}` when there is nothing to say. Errors come back as
+`{"error": "…"}` with a non-2xx status.
+
+| Method and path | Body | Response |
+|---|---|---|
+| `GET /v1/status` | — | `200` the full snapshot: daemon, config, providers, drivers, machines, mounts, conflicts, the last 200 events |
+| `GET /v1/machines` | — | `200` list of machines |
+| `GET /v1/mounts` | — | `200` list of mounts |
+| `GET /v1/mounts/{id}/log` | — | `200 {"mount", "path", "lines": […]}`: the last 64 KiB of that mount's log. `404` when it has no log yet, `400` for an invalid id |
+| `GET /v1/drivers` | — | `200` list of driver probes |
+| `POST /v1/discover` | `{}` | `202 {}`. Every provider refreshes now |
+| `POST /v1/reconcile` | `{}` | `200` the plan: `[{"mount", "action"}]`. Re-probes drivers and runs one pass. It does not skip a retry backoff |
+| `POST /v1/mounts/{target}/mount` | `{}` | `202` the mount ids. Clears the hold and both retry timers. `404` unknown target, `403` not allowed by policy (the body carries the verdict) |
+| `POST /v1/mounts/{target}/unmount` | `{"force": false}` | `202` the mount ids. Adds a persisted hold; `force: true` detaches lazily. `404` unknown target |
+| `POST /v1/config/reload` | `{}` | `200 {"ok": true, "errors": []}`, or `ok: false` with the errors when the file is invalid |
+| `GET /v1/events` | — | Server-sent events |
+
+`{target}` is a mount id, or a machine id meaning all its mounts; a mount id wins when both match. Mount and
+unmount return at once; poll `GET /v1/mounts` to wait for the result.
+
+```sh
+curl -s --unix-socket "$sock" -X POST -H 'Content-Type: application/json' -d '{}' \
+  http://bifrost/v1/mounts/agent-01/mount
+curl -s --unix-socket "$sock" -X POST -H 'Content-Type: application/json' -d '{"force": true}' \
+  http://bifrost/v1/mounts/agent-01/unmount
+```
+
+## Objects
+
+### Mount
+
+```json
+{
+  "id": "agent-01",
+  "machine": "agent-01",
+  "driver": "sshfs",
+  "local_path": "/home/sami/machines/agent-01",
+  "remote": "sami@agent-01.tail1234.ts.net:/home/sami",
+  "state": "mounted",
+  "detail": "",
+  "desired": true,
+  "held": false,
+  "adopted": false,
+  "pid": 4311,
+  "failures": 0,
+  "retry_in_secs": null,
+  "last_error": null,
+  "action": "noop"
+}
+```
+
+`state` is one of `unknown`, `discovered`, `eligible`, `mounted`, `connecting`, `unmounting`, `offline`,
+`degraded` or `failed` ([states](/bifrost/concepts/reconciliation/#states)). `action` is the reconciler's current
+decision, such as `noop`, `mount (sshfs)` or `waiting (backoff 3s)`.
+
+### Machine
+
+| Field | Meaning |
+|---|---|
+| `id`, `name` | Machine id and display name |
+| `source` | The provider whose report won |
+| `shadowed` | Less trusted providers that also report this id |
+| `address`, `port`, `online` | From the winning report; `port` and `online` may be `null` |
+| `tags`, `metadata` | From the winning report |
+| `verdict` | `allowed (<rule>)`, `discover-only` or `denied (<rule>)` |
+| `state` | Aggregated over its mounts |
+| `mounts` | Its mount ids |
+
+### Driver
+
+```json
+{ "name": "sshfs", "available": true, "binary": "/usr/bin/sshfs", "detail": "SSHFS version 3.7.3, fusermount3" }
+```
+
+### Status
+
+`GET /v1/status` returns `version`, `pid`, `uptime_secs`, `socket`, `config_path`, `config_errors` (non-empty
+means the daemon is running on its previous config), `mount_root`, `ready` (warm-up finished), `ssh_agent`,
+`providers`, `drivers`, `auto_driver`, `machines`, `mounts`, `conflicts` and `events`. Each provider has `name`,
+`kind`, `machines`, `refreshes`, `last_ok_secs_ago` and `last_error`.
+
+## Events
+
+`GET /v1/events` is a server-sent event stream. Each frame's `event:` is the event type and its `data:` is a
+JSON record:
+
+```sh
+curl -sN --unix-socket "$sock" http://bifrost/v1/events
+```
+
+```text
+id: 42
+event: MountHealthy
+data: {"seq":42,"ts_unix_ms":1790000000000,"event":{"type":"MountHealthy","mount":"agent-01"}}
+```
+
+| Type | Fields | When |
+|---|---|---|
+| `MachineDiscovered` | `machine`, `provider` | A provider reports a new machine |
+| `MachineLost` | `machine` | A machine expired from every provider |
+| `MachineEligible` | `machine`, `via` | A machine's verdict became allowed |
+| `MountRequested` | `mount`, `driver` | A mount started |
+| `MountStarted` | `mount`, `driver`, `pid` | The mount is up |
+| `MountHealthy` | `mount` | The health probe passes |
+| `MountDegraded` | `mount`, `reason` | The probe fails, or an unmount is blocked |
+| `MountFailed` | `mount`, `error`, `attempt`, `retry_in_ms` | A mount attempt failed, or a mount disappeared |
+| `UnmountStarted` | `mount`, `reason` | An unmount started |
+| `UnmountComplete` | `mount` | The mount is gone |
+| `DriverUnavailable` | `driver`, `reason` | A driver went from available to unavailable |
+| `ConfigurationReloaded` | `ok`, `errors` | A config reload was applied or rejected |
+
+A keep-alive comment is sent every 15 seconds. A client that falls behind receives `event: lagged` with
+`data: {"skipped": N}`, and the stream continues.
+
+<Aside type="note">
+The API has no version negotiation beyond the `/v1` prefix, and no authentication beyond the socket's file
+permissions. Don't expose the socket over the network.
+</Aside>

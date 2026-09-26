@@ -1,0 +1,88 @@
+---
+title: Policy and filtering
+description: Which discovered machines Bifröst may mount, and why a record can never talk its way in.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+**Discovering a machine is not permission to mount it.** Every machine gets a verdict:
+
+| Verdict | Listed | Mounted |
+|---|---|---|
+| `allowed (<rule>)` | yes | yes |
+| `discover-only` | yes | no |
+| `denied (<rule>)` | yes | no |
+
+`bifrost machines show <id>` prints the verdict and the rule that decided it. `bifrost mount` on a machine that
+isn't allowed returns the verdict (HTTP 403). It never overrides policy.
+
+## Where rules live
+
+- **Global:** `[policy.allow]` and `[policy.deny]`.
+- **Per provider:** `include_*` and `exclude_*` in that provider's `[discovery.filter]`.
+
+```toml
+[policy.deny]
+names = ["prod-*"]
+tags = ["prod"]
+
+[[discovery]]
+type = "tailscale"
+
+[discovery.filter]
+include_tags = ["dev", "agent"]
+exclude_names = ["*-old"]
+```
+
+## How a verdict is reached
+
+The rules run in this order. The first one that applies decides.
+
+1. **Provider exclude.** An `exclude_*` match drops only that provider's report of the machine. If no report is
+   left, the machine is denied.
+2. **The most trusted report wins.** When several providers report the same id, only the most trusted remaining
+   report counts: static, then Tailscale, then HTTP, then DNS. It alone supplies the address, user, tags,
+   metadata and the verdict. The others are listed as `shadowed`.
+3. **Deny wins.** A `[policy.deny]` match denies, static machines included.
+4. **Static means allowed.** Machines in `[[machines]]` are allowed unless denied.
+5. **Provider include.** If every `include_*` rule of the provider matches, the machine is allowed.
+6. **Global allow.** If every `[policy.allow]` rule matches, the machine is allowed.
+7. **Otherwise it is discover-only.** A provider with no filter only lists its machines.
+
+Rule 2 means a DNS or HTTP record can never redirect, re-tag or deny a machine that your config or Tailscale also
+reports. To hand such a machine to DNS, exclude it in the more trusted provider's filter (for a static machine,
+remove it from `[[machines]]`).
+
+## Matching
+
+Within one table, rules **AND across kinds** and **OR within a kind**: `include_tags = ["dev", "agent"]` plus
+`include_cidrs = ["10.20.0.0/16"]` means "tagged dev or agent, and inside 10.20.0.0/16".
+
+| Kind | Global keys | Provider keys | Matches when |
+|---|---|---|---|
+| id | `ids` | `include_ids`, `exclude_ids` | the machine id equals an entry. Provider keys also match that provider's own native id (a Tailscale node ID, a bf1 `id=`, an inventory `id`) |
+| name | `names` | `include_names`, `exclude_names` | the id matches a glob (`*`, `?`) |
+| CIDR | `cidrs` | `include_cidrs`, `exclude_cidrs` | the address is an IP literal inside a range. Hostnames are never resolved |
+| tag | `tags` | `include_tags`, `exclude_tags` | the machine has any listed tag |
+| provider | `providers` | — | the provider name or kind is listed |
+| metadata | `metadata` | `include_metadata`, `exclude_metadata` | allow/include: **every** pair equals; deny/exclude: **any** pair equals |
+
+- A deny or exclude fires on any single matching entry.
+- A CIDR deny **fails closed**: a non-static machine without an IP literal matches it.
+- Global `ids` match the machine id only, never a native id. A DNS record can't publish a Tailscale node ID and
+  satisfy `[policy.allow] ids`.
+
+<Aside type="caution" title="Scope global allow rules">
+A global allow matches whichever provider supplied the winning report, and DNS and HTTP control their own names,
+tags and metadata. Add `providers = ["tailscale"]` to a global allow, or prefer a provider-level `include_*`.
+</Aside>
+
+## What deny can and can't protect
+
+A deny on tags, names or metadata published by DNS or HTTP is advisory: that source controls those values and can
+simply stop sending them. The real protection is the allow rules plus SSH host-key verification.
+
+## Record hints
+
+`honor_hints = true` in a provider's `[discovery.mount]` lets a record's `user=` and `path=` override the
+template, after validation. Records can never choose a driver, a command or an ssh option.

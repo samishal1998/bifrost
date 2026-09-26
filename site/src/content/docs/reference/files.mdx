@@ -1,0 +1,46 @@
+---
+title: File locations
+description: Where Bifröst keeps its config, state, logs, socket and mounts.
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+
+| What | Path | Override |
+|---|---|---|
+| Config | `~/.config/bifrost/config.toml` (Linux and macOS) | `BIFROST_CONFIG` |
+| State directory | `$XDG_STATE_HOME/bifrost`, else `~/.local/state/bifrost` | `BIFROST_STATE_DIR` |
+| Socket (Linux) | `$XDG_RUNTIME_DIR/bifrost/bifrost.sock`, else `~/.cache/bifrost/bifrost.sock` | `BIFROST_SOCKET` |
+| Socket (macOS) | `~/Library/Caches/bifrost/bifrost.sock` | `BIFROST_SOCKET` |
+| Mounts | `~/machines/<id>` | `mount.root` in the config |
+
+## The state directory
+
+<FileTree>
+- ~/.local/state/bifrost/
+  - bifrostd.lock one daemon per state directory
+  - state.json held mounts and the mounts to adopt on restart
+  - logs/
+    - agent-01.log sshfs or rclone output for one mount
+  - rclone/
+    - build-artifacts/ rclone's VFS cache for one mount
+</FileTree>
+
+- **`state.json`** is written atomically (temp file, sync, rename) with mode `0600` whenever a hold or a mount
+  changes. The holds in it are your intent and always win; the mount records are only hints for adoption. A file
+  that doesn't parse is renamed to `state.json.corrupt-<unix time>` and the daemon starts empty.
+- **`bifrostd.lock`** makes a second daemon on the same state directory exit 1 with
+  `bifrostd: already running (lock …/bifrostd.lock)`. The lock is released automatically if the daemon crashes.
+
+## Permissions
+
+- Directories the daemon creates are `0700`. Directories that already exist are never chmodded, but the state
+  and socket directories must belong to you, or the daemon refuses to start.
+- The socket is always `0600`, and the socket path must fit in 103 bytes.
+- The mount root must belong to you and must not be world-writable. It can't be `/` or your home directory.
+- By default nothing lives under `/tmp`.
+
+## The mount root
+
+Each mount is one directory, `<root>/<id>`. Bifröst creates it (mode `0700`) when it is missing, and refuses a
+path that is a symlink, a file, a non-empty directory or already mounted by something else. Ids are single
+lowercase path components, so they can't escape the root or collide on a case-insensitive filesystem.

@@ -1,0 +1,52 @@
+---
+title: Security model
+description: The security principles Bifröst was built to, and exactly how each one is enforced.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Bifröst turns names it reads from the network into commands it runs and folders it creates. Every step of that
+path treats discovery data as untrusted. The first eight rows below are the principles of the product design
+(PRD §23); the last covers the daemon's local API.
+
+| Principle | How Bifröst enforces it |
+|---|---|
+| **Discovery does not imply trust** | Non-static machines are discover-only until a rule allows them. The most trusted report wins, so DNS or HTTP can't redirect or deny a machine that your config or Tailscale reports. Native ids are matched only by their own provider's filter |
+| **No SSH passwords** | There is no password key; unknown keys are errors. ssh always runs with `BatchMode=yes` and `/dev/null` as stdin, so it can never prompt |
+| **Prefer agent, keys, Tailscale SSH** | Always the system `ssh`. `SSH_AUTH_SOCK` is inherited, and `bifrost doctor` reports whether the daemon sees it |
+| **Never weaken host verification** | No option Bifröst passes touches host-key checking, and no config key can. See below |
+| **Mount only explicit paths** | Remote paths come from your config or the provider's template. A record's `path=` counts only with `honor_hints`, after validation. There is no driver hint |
+| **Never execute discovery-supplied commands** | Discovery data can only become a validated name, host, user, path or port. Commands are built as argument lists without a shell, and no positional argument can start with `-`. rclone runs with `--sftp-shell-type=none` |
+| **TXT and HTTP data is untrusted** | Size and count limits, per-record isolation, whole-node rejection for DNS, and escape stripping on every string that is displayed, so a record can't inject terminal sequences |
+| **No path traversal or collisions** | Ids are single lowercase path components. Static mounts win conflicts, which are reported. Symlinks, files, non-empty or occupied mount points are refused. The root can't be `/` or `$HOME`, and must be yours and not world-writable |
+| **A private local API** | A `0600` Unix socket, `0700` directories, a lock against a second daemon, nothing under `/tmp` by default |
+
+## Host keys
+
+Every ssh that Bifröst starts, whether through sshfs, rclone's `--sftp-ssh` or the preflight, gets these
+options:
+
+```text
+BatchMode=yes ConnectTimeout=10 ServerAliveInterval=15 ServerAliveCountMax=3 ControlMaster=no ControlPath=none
+```
+
+Nothing in that list touches `StrictHostKeyChecking`, `UserKnownHostsFile` or `ProxyCommand`. Your
+`~/.ssh/config`, or `mount.ssh_config` passed as `-F`, decides trust, and `BatchMode=yes` turns "ask" into
+"fail". An unknown host fails with `Host key verification failed` until you add its key
+([how](/bifrost/guides/troubleshooting/#host-key-verification-failed)).
+
+The preflight and rclone's `--sftp-ssh` also pass `-a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no`
+(sshfs does the same by itself). A `ForwardAgent`, `ForwardX11` or port forward in your ssh config never reaches a
+mounted host: your agent is only used to log in.
+
+## Processes
+
+- Bifröst never kills a process that holds your files. A forced unmount is a lazy detach.
+- The only process it ever signals is its own mount child that never finished mounting.
+- It never runs `tailscale up`, `down` or `set`, and never follows an HTTP redirect, so your inventory
+  credentials can't leak to another host.
+
+<Aside type="caution" title="Advisory denies">
+A deny rule on tags, names or metadata that come from DNS or HTTP only works while that source keeps publishing
+them; the source controls those values. Rely on allow rules and SSH host-key verification for protection.
+</Aside>

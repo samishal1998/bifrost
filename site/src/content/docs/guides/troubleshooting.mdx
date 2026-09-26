@@ -1,0 +1,134 @@
+---
+title: Troubleshooting
+description: bifrost doctor, host keys, busy unmounts, stuck mounts and where the logs are.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+## Start with `bifrost doctor`
+
+`doctor` checks the config, the daemon, ssh and the agent, discovery, the drivers and FUSE. It works without a
+running daemon and uses it when it is up.
+
+```console
+$ bifrost doctor
+Config         ✓ /home/sami/.config/bifrost/config.toml
+Daemon         ✓ running pid 4242
+SSH            ✓ ssh /usr/bin/ssh   ✓ SSH_AUTH_SOCK visible to daemon
+Discovery
+  ✓ static      2 machines
+  ✓ tailscale   5 machines
+  ✗ infra       timed out
+Mount Drivers
+  ✓ sshfs       /usr/bin/sshfs (SSHFS version 3.7.3, fusermount3)
+  ✓ rclone      /usr/bin/rclone (rclone v1.75.1, fusermount3)
+  ✗ rclone-nfs  macOS only
+FUSE           ✓ /dev/fuse  /usr/bin/fusermount3
+Selected default
+  sshfs
+```
+
+It exits 1 for a missing or invalid config file, when no driver is usable, or when it shows the macOS
+permission hint.
+
+## A mount won't come up
+
+`bifrost mounts` shows each mount's state, with an `ERROR` column when something failed. `bifrost reconcile`
+prints what the daemon plans to do with each mount and why:
+
+| Action | Meaning |
+|---|---|
+| `mount (sshfs)` | about to mount with that driver |
+| `waiting (backoff 8s)` | the last attempt failed; retrying with exponential backoff |
+| `waiting (no driver: …)` | the chosen driver is not available; install it or change `driver` |
+| `waiting (machine offline)` | the provider reports the machine offline |
+| `waiting (warming up)` | right after start, waiting for every provider to report once |
+| `waiting (in flight)` | a mount or unmount is running now |
+| `degraded (…)` | mounted, but the health probe fails or a change is pending |
+
+`bifrost mount <id>` skips the backoff and retries now. For a machine that is listed but never mounted, check
+its verdict with `bifrost machines show <id>`: `discover-only` and `denied` machines are never mounted
+([policy](/bifrost/guides/policy/)).
+
+## Host key verification failed
+
+The host isn't in your `known_hosts` yet, or its key changed. Bifröst runs ssh with `BatchMode=yes` and will not
+accept a key for you. Check the key out of band, then add it:
+
+<Steps>
+
+1. Look at the fingerprints and compare them with the host's real ones (its console, your inventory, the cloud
+   provider's panel):
+
+   ```sh
+   ssh-keyscan -p 22 agent-01 | ssh-keygen -lf -
+   ```
+
+2. Add the key, or just `ssh agent-01` once and answer yes:
+
+   ```sh
+   ssh-keyscan -p 22 agent-01 >> ~/.ssh/known_hosts
+   ```
+
+3. Retry now instead of waiting for the backoff:
+
+   ```sh
+   bifrost mount agent-01
+   ```
+
+</Steps>
+
+## Permission denied (publickey)
+
+The daemon's ssh can't reach your key. If `doctor` shows `✗ SSH_AUTH_SOCK not visible to daemon`, the daemon
+was started without your agent; see [the SSH agent](/bifrost/guides/service/#the-ssh-agent). Test the exact path
+with `ssh -o BatchMode=yes user@host true`.
+
+## Busy unmounts
+
+```console
+$ bifrost unmount agent-01
+agent-01  unmount blocked: busy (files open); retry with --force
+```
+
+Something still has files open under the mount: a shell `cd`'d into it, an editor, a build. Find it with
+`fuser -vm ~/machines/agent-01` or `lsof +f -- ~/machines/agent-01`, close it, and unmount again. The daemon
+also keeps retrying on its own.
+
+`bifrost unmount --force agent-01` detaches lazily instead: the path disappears at once and open files keep
+working until they are closed. Nothing is killed.
+
+## The mount point is refused
+
+Bifröst mounts only on a missing or empty directory. A mount fails with `… is a symlink`,
+`… is not a directory`, `… is not empty` or `occupied by <fstype> <source>` when something else is already at
+`<root>/<id>`. Move that out of the way; Bifröst never deletes it for you.
+
+## The daemon
+
+| Message | Fix |
+|---|---|
+| `bifrostd is not running (socket …)`, exit 3 | Start `bifrostd`, or point `--socket` / `BIFROST_SOCKET` at the right socket |
+| `path must be shorter than SUN_LEN`, exit 3 | The socket path is over 103 bytes. Set a shorter `BIFROST_SOCKET` |
+| `bifrostd: already running (lock …/bifrostd.lock)`, exit 1 | Another daemon holds the lock in the state directory. `bifrost daemon status` shows it |
+| `mount.root change requires restart` | Restart the daemon to move the root |
+| config errors in `bifrost status` | The last edit was invalid and the previous config is still running. Run `bifrost config check` |
+
+## Logs
+
+- **Daemon:** stderr, so `journalctl --user -u bifrost -f` under systemd. Set `BIFROST_LOG=debug` (or `trace`)
+  for more. Header values and secrets are never logged.
+- **Per mount:** the sshfs or rclone output goes to `<state>/logs/<id>.log`
+  (`~/.local/state/bifrost/logs/<id>.log` by default). In the TUI, select the mount and press `l`. Over the API:
+
+  ```sh
+  curl -s --unix-socket "$XDG_RUNTIME_DIR/bifrost/bifrost.sock" http://bifrost/v1/mounts/agent-01/log
+  ```
+
+- **Events:** the last 200 are in `bifrost status --json`, and they stream live over
+  [SSE](/bifrost/reference/api/#events).
+
+<Aside type="note" title="macOS: operation not permitted">
+If a mount's error ends with *allow the macFUSE system extension in System Settings → Privacy & Security*,
+approve macFUSE there and reboot if asked, or switch to FUSE-T or `rclone-nfs`.
+</Aside>

@@ -1,0 +1,107 @@
+---
+title: Mount drivers
+description: SSHFS, rclone and rclone-nfs, how auto picks one, and what unmount does.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A driver turns a mount spec into a mounted folder. Every driver goes through your system `ssh`, so your keys,
+agent, `known_hosts` and `~/.ssh/config` apply as they are.
+
+| Driver | Linux | macOS |
+|---|---|---|
+| `sshfs` | sshfs 3 + fuse3 (`fusermount3`) | sshfs with macFUSE or FUSE-T |
+| `rclone` | `rclone mount` + fuse3 | `rclone mount` with macFUSE or FUSE-T |
+| `rclone-nfs` | unavailable ("macOS only") | `rclone nfsmount` (needs `/sbin/mount_nfs`, no FUSE) |
+
+`bifrost drivers` shows what each probe found and which driver `auto` picks. It probes locally when the daemon
+is down.
+
+```console
+$ bifrost drivers
+✓ sshfs       /usr/bin/sshfs   SSHFS version 3.7.3, fusermount3
+✓ rclone      /usr/bin/rclone  rclone v1.75.1, fusermount3
+✗ rclone-nfs                   macOS only
+default (auto): sshfs
+```
+
+## Choosing a driver
+
+Set `driver` on a static mount, in a provider's `[discovery.mount]`, or as `mount.default_driver`. The default
+everywhere is `auto`, which takes the first available driver in `mount.auto_order`:
+
+| OS | Default `auto_order` |
+|---|---|
+| Linux | `sshfs`, `rclone` |
+| macOS | `rclone-nfs`, `rclone`, `sshfs` |
+
+```toml
+[mount]
+default_driver = "auto"            # auto | sshfs | rclone | rclone-nfs
+auto_order = ["sshfs", "rclone"]
+```
+
+- A named driver is never substituted. If it is unavailable, the mount waits and says why.
+- `auto` is sticky: a mount keeps its driver until its spec changes, so a driver that comes and goes never
+  remounts anything.
+
+## SSHFS
+
+The default on Linux. Bifröst runs sshfs 3 with `reconnect`, so a short network drop is handled inside the mount
+instead of by remounting. On macOS it adds `volname=<id>` (and `noappledouble` with macFUSE).
+
+## rclone
+
+rclone always goes through OpenSSH with `--sftp-ssh`; its built-in SSH library, which skips host-key checks, is
+never used. It runs with `--config=/dev/null` and a per-mount VFS cache in `<state>/rclone/<id>`.
+
+```toml
+[mount]
+vfs_cache_mode = "writes"          # off | minimal | writes | full
+```
+
+rclone logs "No host key validation is being performed". That refers to the unused internal library, not to
+your mounts.
+
+## Shared SSH settings
+
+Bifröst passes these options to ssh, to sshfs and to rclone's `--sftp-ssh`:
+
+```text
+BatchMode=yes ConnectTimeout=10 ServerAliveInterval=15 ServerAliveCountMax=3 ControlMaster=no ControlPath=none
+```
+
+None of them touches host-key checking, and no config key can. To use a separate ssh config for Bifröst, set
+`mount.ssh_config`; it is passed as `-F`. Before every mount, an `ssh -s <host> sftp` preflight runs, and its
+error becomes the mount's `last_error`.
+
+## Unmounting
+
+- **Graceful by default.** A busy mount (files open) stays mounted, reports
+  `unmount blocked: busy (files open)`, and is retried later.
+- **Forced** with `bifrost unmount --force`, and automatically for dead mounts and mounts hung past
+  `offline_grace_period`: a lazy detach (`fusermount3 -uz`, or `diskutil unmount force` on macOS). Open files keep
+  working until they are closed.
+- **Nothing is killed.** Bifröst never signals a process that holds your files. The only process it ever signals
+  is its own mount child that never finished mounting.
+- **Stopping the daemon unmounts nothing.** Mounts keep serving and the next `bifrostd` adopts them.
+
+## macOS
+
+<Aside type="caution">
+macOS support is built but not field-tested: the release binaries are built on GitHub's macOS runners and CI builds
+and unit-tests the workspace there, but mounting on a real Mac (macFUSE, FUSE-T, `rclone nfsmount`) has not been
+exercised yet.
+</Aside>
+
+- **FUSE detection:** macFUSE at `/Library/Filesystems/macfuse.fs`; FUSE-T at
+  `/Library/Application Support/fuse-t` or `/usr/local/lib/libfuse-t.dylib`.
+- **`rclone-nfs` comes first** in the default order because it needs no kernel extension. It serves the mount on
+  an unauthenticated `127.0.0.1` NFS port that other local users could reach, so on a shared Mac put `rclone` or
+  `sshfs` first. `nfsmount` may also need root. With `vfs_cache_mode` below `writes` it would be read-only, so
+  Bifröst raises it to `writes`.
+- **Mount table** via `getmntinfo`; unmount with `/sbin/umount`; force with `diskutil unmount force`.
+- **Permissions:** macFUSE needs its system extension approved. When a mount's log mentions
+  `kernel extension`, `System Extension` or `not permitted`, the error gets the hint *allow the macFUSE system
+  extension in System Settings → Privacy & Security*, and `bifrost doctor` repeats it. Approve it there (and
+  reboot if asked), or use FUSE-T or `rclone-nfs`, which need no kernel extension.

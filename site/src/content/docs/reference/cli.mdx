@@ -1,0 +1,132 @@
+---
+title: CLI
+description: Every bifrost command, its flags, its output and its exit codes, plus bifrostd and bifrost-tui.
+---
+
+`bifrost` is a client of the daemon. It talks to `bifrostd` over the local socket; only `config check`, `doctor`
+and `drivers` also work without it.
+
+## Global flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--json` | off | Print the API's JSON instead of text |
+| `--socket <PATH>` | `$BIFROST_SOCKET`, else `$XDG_RUNTIME_DIR/bifrost/bifrost.sock`, else `~/.cache/bifrost/bifrost.sock`; macOS `~/Library/Caches/bifrost/bifrost.sock` | Daemon socket |
+| `--config <PATH>` | `$BIFROST_CONFIG`, else `~/.config/bifrost/config.toml` | Config file, read only by `config check`, `doctor` and a daemon-less `drivers` |
+| `-h`, `--help` | | Help for any command |
+| `-V`, `--version` | | `bifrost 0.1.0` |
+
+The daemon reads its own config from `$BIFROST_CONFIG` or the default path, never from `--config`.
+
+## Commands
+
+| Command | Needs the daemon | What it does |
+|---|---|---|
+| `bifrost status` | yes | Daemon, config, root, machine and mount counts, providers, drivers |
+| `bifrost machines` (`machines list`) | yes | `NAME SOURCE ADDRESS STATE MOUNTED` |
+| `bifrost machines show <id>` | yes | Verdict, address, online, tags, metadata, shadowed providers, mounts |
+| `bifrost mounts` | yes | `ID MACHINE DRIVER STATE LOCAL REMOTE`, plus `ERROR` when any mount has one |
+| `bifrost mount <target> [--no-wait]` | yes | Clear the hold, retry now, and wait for the result |
+| `bifrost unmount <target> [--force] [--no-wait]` | yes | Unmount and hold it down until `bifrost mount`. `--force` detaches lazily even when busy; it never kills a process |
+| `bifrost discover` | yes | Refresh every provider now: `PROVIDER KIND STATUS MACHINES LAST-OK` |
+| `bifrost reconcile` | yes | Re-probe drivers, run one pass, print the plan: `MOUNT ACTION` |
+| `bifrost drivers` | no | Driver probes and the `auto` choice. Probed locally when the daemon is down |
+| `bifrost doctor` | no | Config, daemon, ssh and agent, discovery, drivers, FUSE |
+| `bifrost config check [PATH]` | no | Validate a config file (default: `--config`) |
+| `bifrost config reload` | yes | Make the daemon reload its config now |
+| `bifrost daemon status` | yes | `running pid … up … socket …`, or `not running (socket …)` with exit 3 |
+
+### Mount targets
+
+`<target>` is a mount id, or a machine id meaning all of that machine's mounts. An id that is also a mount's id
+means that mount only, even when it is a machine id too. With this config:
+
+```toml
+[[machines]]
+name = "build"
+host = "10.0.0.18"
+
+[[machines.mounts]]
+remote = "/home/sami"
+local = "build"
+
+[[machines.mounts]]
+remote = "/srv/artifacts"
+local = "build-artifacts"
+```
+
+`bifrost unmount build` unmounts `build` and leaves `build-artifacts` mounted. Name the other one as well:
+`bifrost unmount build-artifacts`. In the TUI, `m`, `u` and `U` on a machine row always cover all its mounts.
+
+### Waiting
+
+`mount` and `unmount` poll until the mount settles, for up to 60 seconds, then print one line per mount:
+
+```text
+agent-01  mounted  /home/sami/machines/agent-01 (sshfs, pid 4311)
+agent-01  failed: ssh preflight: Host key verification failed.
+agent-01  unmounted (held; 'bifrost mount agent-01' to resume)
+agent-01  unmount blocked: busy (files open); retry with --force
+```
+
+`--no-wait` returns as soon as the daemon accepts the request. A hold (from `unmount`) persists across daemon
+restarts; `mount` clears it. `mount` on a machine that policy doesn't allow fails with its verdict.
+
+### Status
+
+```console
+$ bifrost status
+bifrostd 0.1.0  pid 4242  up 3h12m  /run/user/1000/bifrost/bifrost.sock
+config    /home/sami/.config/bifrost/config.toml (ok)
+root      /home/sami/machines
+machines  7 (3 eligible)   mounts 3/3 mounted, 0 degraded, 0 failed
+providers static ok (2) · tailscale ok (5, 12s ago) · infra error: timed out (last ok 2m ago)
+drivers   rclone ✓ · rclone-nfs ✗ macOS only · sshfs ✓ (default)
+```
+
+`eligible` counts the machines policy allows. When the running config came from an earlier file because the
+latest edit is invalid, the errors are listed under the `config` line.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | OK |
+| `1` | Failed: an API error, a mount that ended failed or offline, a busy unmount, an invalid config. For `doctor`: a missing or invalid config file, no usable driver, or the macOS permission hint |
+| `2` | Usage error |
+| `3` | The daemon is not reachable |
+
+## bifrostd
+
+```text
+usage: bifrostd [--version | --help]
+configured by BIFROST_CONFIG, BIFROST_SOCKET, BIFROST_STATE_DIR and BIFROST_LOG (error|warn|info|debug|trace)
+```
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean shutdown (SIGTERM or SIGINT) |
+| `1` | Startup failure: already running, directories, socket |
+| `2` | Usage, or an invalid config |
+
+`SIGHUP` reloads the config. Stopping the daemon never unmounts; see
+[Running as a service](/bifrost/guides/service/).
+
+## bifrost-tui
+
+```text
+usage: bifrost-tui [--socket PATH]
+```
+
+The socket default is the same as the CLI's. See the [TUI reference](/bifrost/reference/tui/).
+
+## Environment
+
+| Variable | Used by | Meaning |
+|---|---|---|
+| `BIFROST_CONFIG` | `bifrostd`, `bifrost` | Config file path |
+| `BIFROST_SOCKET` | all | Socket path (at most 103 bytes) |
+| `BIFROST_STATE_DIR` | `bifrostd` | State directory |
+| `BIFROST_LOG` | `bifrostd` | `error`, `warn`, `info` (default), `debug` or `trace` |
+| `NO_COLOR` | `bifrost-tui` | Any non-empty value turns colour off; the state glyphs remain |
+| `SSH_AUTH_SOCK` | `bifrostd` | Your SSH agent, inherited by every ssh it runs |

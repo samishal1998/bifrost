@@ -1,0 +1,186 @@
+---
+title: Installation
+description: Install Bifröst with one command, from a release tarball, or from source, plus the runtime tools it needs.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Bifröst is three binaries: `bifrostd` (the daemon), `bifrost` (the CLI) and `bifrost-tui` (the terminal UI).
+
+## Install script
+
+```sh
+curl -fsSL https://samishal1998.github.io/bifrost/install.sh | sh
+```
+
+The same script, served straight from the repository:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/samishal1998/bifrost/main/install.sh | sh
+```
+
+What it does:
+
+1. Picks the release asset for your OS and CPU, `bifrost-<target>.tar.gz`.
+2. Downloads it together with `SHA256SUMS` and checks the hash with `sha256sum` or `shasum`. On a mismatch, or
+   with neither tool present, it stops and installs nothing.
+3. Puts `bifrost`, `bifrostd` and `bifrost-tui` into the install directory. Each binary is staged first and then
+   renamed into place, so an upgrade is safe while `bifrostd` is running. Then it runs `bifrost --version`.
+4. Warns when the install directory is not on your `PATH`, and lists which runtime tools it found.
+
+It never uses sudo and installs nothing but the three binaries.
+
+<Aside type="tip" title="Read it first">
+`curl -fsSL https://samishal1998.github.io/bifrost/install.sh -o install.sh`, read it, then `sh install.sh`.
+</Aside>
+
+### Options
+
+Set these on the `sh` side of the pipe:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BIFROST_VERSION` | latest release | A release tag such as `v0.1.0` (`0.1.0` works too) |
+| `BIFROST_INSTALL_DIR` | `$HOME/.local/bin` | Where the three binaries go. It must be writable by you |
+| `BIFROST_DOWNLOAD_URL` | GitHub Releases | Base URL of a mirror. The script fetches `<base>/SHA256SUMS` and `<base>/bifrost-<target>.tar.gz` |
+
+```sh
+# pin a version
+curl -fsSL https://samishal1998.github.io/bifrost/install.sh | BIFROST_VERSION=v0.1.0 sh
+
+# install somewhere else
+curl -fsSL https://samishal1998.github.io/bifrost/install.sh | BIFROST_INSTALL_DIR="$HOME/bin" sh
+```
+
+## Platforms
+
+| OS | CPU | Release asset |
+|---|---|---|
+| Linux (static, musl) | x86_64 | `bifrost-x86_64-unknown-linux-musl.tar.gz` |
+| Linux (static, musl) | arm64 | `bifrost-aarch64-unknown-linux-musl.tar.gz` |
+| macOS | Intel | `bifrost-x86_64-apple-darwin.tar.gz` |
+| macOS | Apple silicon | `bifrost-aarch64-apple-darwin.tar.gz` |
+
+Each tarball holds one directory, `bifrost-<target>/`, with the three binaries, `README.md`, `LICENSE-MIT` and
+`LICENSE-APACHE`.
+
+<Aside type="caution" title="macOS is not field-tested">
+The macOS binaries are built and unit-tested on GitHub's macOS runners, but mounting on a real Mac has not been
+exercised yet. Linux is the tested platform. Reports from Mac users are welcome.
+</Aside>
+
+## Manual download
+
+<Steps>
+
+1. Pick your target from the table above and download the tarball and the checksum list:
+
+   ```sh
+   target=x86_64-unknown-linux-musl
+   base=https://github.com/samishal1998/bifrost/releases/latest/download
+   curl -fsSLO "$base/bifrost-$target.tar.gz"
+   curl -fsSLO "$base/SHA256SUMS"
+   ```
+
+   For a specific version, use `https://github.com/samishal1998/bifrost/releases/download/v0.1.0` as the base.
+
+2. Verify the tarball:
+
+   <Tabs syncKey="os">
+   <TabItem label="Linux">
+   ```sh
+   grep " bifrost-$target.tar.gz\$" SHA256SUMS | sha256sum -c -
+   ```
+   </TabItem>
+   <TabItem label="macOS">
+   ```sh
+   grep " bifrost-$target.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
+   ```
+   </TabItem>
+   </Tabs>
+
+   It must print `bifrost-<target>.tar.gz: OK`.
+
+3. Unpack and install:
+
+   ```sh
+   tar -xzf "bifrost-$target.tar.gz"
+   mkdir -p ~/.local/bin
+   install -m 755 "bifrost-$target/bifrost" "bifrost-$target/bifrostd" "bifrost-$target/bifrost-tui" ~/.local/bin/
+   ```
+
+</Steps>
+
+## Build from source
+
+You need Rust 1.89 or newer (edition 2024).
+
+```sh
+git clone https://github.com/samishal1998/bifrost
+cd bifrost
+cargo build --release
+mkdir -p ~/.local/bin
+install -m 755 target/release/bifrost target/release/bifrostd target/release/bifrost-tui ~/.local/bin/
+```
+
+With `CARGO_TARGET_DIR` set, the binaries are in `$CARGO_TARGET_DIR/release/` instead.
+
+## Runtime dependencies
+
+Bifröst drives the tools you already trust. It looks for them on `$PATH` and in `/usr/local/bin`, `/usr/bin`
+and `/bin` (plus `/opt/homebrew/bin` on macOS), so a minimal service `PATH` still works.
+
+- `ssh` (the OpenSSH client), always. Every driver goes through the system `ssh`.
+- Linux: `sshfs` and/or `rclone`, plus FUSE 3 (`/dev/fuse` and `fusermount3`, package `fuse3`).
+- macOS: macFUSE or FUSE-T for `sshfs` and `rclone`. `rclone` alone is enough for the `rclone-nfs` driver.
+- `tailscale`, only if you use the Tailscale discovery provider.
+
+<Tabs syncKey="distro">
+<TabItem label="Debian / Ubuntu">
+```sh
+sudo apt install openssh-client sshfs fuse3
+sudo apt install rclone        # optional second driver
+```
+</TabItem>
+<TabItem label="Fedora">
+```sh
+sudo dnf install openssh-clients fuse-sshfs fuse3
+sudo dnf install rclone        # optional second driver
+```
+</TabItem>
+<TabItem label="Arch">
+```sh
+sudo pacman -S openssh sshfs fuse3
+sudo pacman -S rclone          # optional second driver
+```
+</TabItem>
+<TabItem label="macOS">
+```sh
+brew install rclone                                   # rclone-nfs needs no FUSE at all
+# for sshfs, pick one FUSE:
+brew install --cask macfuse && brew install gromgit/fuse/sshfs-mac
+brew install macos-fuse-t/cask/fuse-t macos-fuse-t/cask/fuse-t-sshfs
+```
+</TabItem>
+</Tabs>
+
+Then check everything in one go:
+
+```sh
+bifrost doctor
+```
+
+`doctor` works without a running daemon. See [Troubleshooting](/bifrost/guides/troubleshooting/) for what each
+line means.
+
+## Uninstall
+
+Mounts outlive the daemon, so unmount first, then stop `bifrostd` and remove the binaries:
+
+```sh
+bifrost unmount <id>                        # for each mount in `bifrost mounts`
+systemctl --user disable --now bifrost      # or stop bifrostd however you started it
+rm ~/.local/bin/bifrost ~/.local/bin/bifrostd ~/.local/bin/bifrost-tui
+```
+
+Your config (`~/.config/bifrost/`) and state (`~/.local/state/bifrost/`) stay until you delete them.

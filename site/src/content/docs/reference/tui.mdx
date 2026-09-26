@@ -1,0 +1,59 @@
+---
+title: TUI
+description: The bifrost-tui views, keys and state glyphs.
+---
+
+```sh
+bifrost-tui [--socket PATH]
+```
+
+`bifrost-tui` is a live view of the daemon. It polls `bifrostd` once a second and talks to nothing else. If the
+daemon goes away, a red banner reads `bifrostd not reachable at <socket> — retrying` and the last snapshot stays
+on screen.
+
+## Views
+
+| Key | View | Shows |
+|---|---|---|
+| `1` | Overview | The wordmark and tagline, counts, provider health, config errors, the last 5 events |
+| `2` | Machines | Every machine with its state glyph, source, state and driver |
+| `3` | Mounts | Every mount with its machine, driver, state, local and remote path, and last error |
+| `4` | Discovery | Each provider's status, machine count and last refresh |
+| `5` | Drivers | Each driver probe, with the `auto` default marked |
+| `6` | Events | Recent events, newest first, with their UTC time |
+| `7` | Logs | The log of the selected mount, refreshed every 2 seconds |
+
+Tab and Shift-Tab cycle through the views.
+
+## Keys
+
+| Key | Action |
+|---|---|
+| `1`–`7`, Tab, Shift-Tab | Switch view |
+| ↑ / ↓, `j` / `k` | Select |
+| `m` | Mount the selection (a machine means all its mounts) |
+| `u` | Unmount (and hold) |
+| `U` | Force unmount: lazy detach, never kills. Asks y/n |
+| `r` | Reconcile now |
+| `s` | Discover now |
+| `c` | Reload config |
+| `d`, Enter | Details: verdict, observations, last error, next retry |
+| `l` | Logs of the selection |
+| `/` | Filter by substring. Enter applies, Esc clears |
+| `?` | Help |
+| `q`, Ctrl-C | Quit |
+
+The result of each command shows in the status line.
+
+## States
+
+| Glyph | Colour | State |
+|---|---|---|
+| ● | Aurora Teal | mounted |
+| ◌ | Glacial Blue | connecting, unmounting |
+| ◐ | amber | degraded |
+| ✕ | rose | failed |
+| ○ | Stone | discovered, eligible, offline, unknown |
+
+The [states page](/bifrost/concepts/reconciliation/#states) explains each one. Set `NO_COLOR` to any non-empty
+value for a colourless UI; the glyphs still carry the state.

@@ -1,0 +1,84 @@
+---
+title: Architecture
+description: How a machine travels from a discovery provider to a folder under ~/machines, and the principles that keep the pieces apart.
+---
+
+```text
+discovery providers → machine registry → policy → desired mounts → reconciler → mount drivers → ~/machines/<id>
+```
+
+## The pipeline
+
+1. **Discovery providers** report machines: static config, Tailscale, DNS TXT and HTTP. Each runs on its own
+   interval and knows nothing about mounting.
+2. **The registry** keeps every provider's latest reports. A report that stops arriving expires after
+   `max(TTL, 3 × interval)`. A provider that fails keeps its last good view, frozen, so an outage never looks
+   like every machine vanishing.
+3. **Policy** gives each machine a verdict: allowed, discover-only or denied. When providers disagree, the most
+   trusted report wins outright (static, Tailscale, HTTP, DNS). See [Policy](/bifrost/guides/policy/).
+4. **Desired mounts** are computed from the allowed machines: static mounts from `[[machines]]`, one mount per
+   discovered machine from its provider's `[discovery.mount]` template, minus anything you have held down with
+   `bifrost unmount`.
+5. **The reconciler** compares desired mounts with what is actually mounted and picks one action per mount:
+   mount, unmount, remount, or wait. See [Reconciliation](/bifrost/concepts/reconciliation/).
+6. **Mount drivers** (sshfs, rclone, rclone-nfs) do the work, always through your system `ssh`. They know
+   nothing about how a machine was found.
+
+## Components
+
+| Binary | Role |
+|---|---|
+| `bifrostd` | The daemon: discovery, policy, reconciliation and the local API. It owns every mount's lifecycle |
+| `bifrost` | The CLI, a client of the daemon's API |
+| `bifrost-tui` | The terminal UI, another client of the same API |
+
+The workspace has eight crates:
+
+| Crate | Contents |
+|---|---|
+| `bifrost-core` | Models, validation, policy, registry and the reconcile planner. No I/O |
+| `bifrost-config` | Parsing and validating `config.toml`, default paths |
+| `bifrost-discovery` | The Tailscale, DNS and HTTP providers |
+| `bifrost-mount` | The sshfs, rclone and rclone-nfs drivers, the mount table, health probes |
+| `bifrost-client` | The HTTP-over-Unix-socket client |
+| `bifrost-daemon` | `bifrostd` |
+| `bifrost-cli` | `bifrost` |
+| `bifrost-tui` | `bifrost-tui` |
+
+## Inside the daemon
+
+One task, the actor, owns all mutable state: the config, the registry, every mount's runtime state, the holds and
+the event log. Everything else sends it messages: provider results, finished mount operations, health results,
+timer ticks, API calls and config reloads. There are no locks on domain state, and the actor never waits on I/O
+or touches a mount path itself.
+
+A pass runs whenever something changes:
+
+| Trigger | When |
+|---|---|
+| Startup | Right after existing mounts are adopted |
+| Discovery | Each provider result |
+| Health | Every `health_interval`, for each mounted path |
+| Fallback | Every `reconcile_interval`, with a driver re-probe |
+| Deadlines | The next retry or grace period that expires |
+| Child exit | A mount helper exited; that mount is probed at once |
+| Config | A file change, `SIGHUP` or `bifrost config reload` |
+| API | `mount`, `unmount`, `discover`, `reconcile` |
+
+Mount and unmount calls run as separate tasks under timeouts and report back as messages. Health probes on a
+live mount run in a blocking thread with a 5 second timeout, so a hung FUSE mount can't stall the daemon.
+
+## Design principles
+
+1. Discovery and mounting are separate.
+2. Discovery never equals authorization.
+3. Drivers never know how machines were discovered.
+4. Providers never know how filesystems are mounted.
+5. The daemon owns lifecycle.
+6. The CLI and TUI are clients of the daemon.
+7. Desired state is declarative.
+8. Reconciliation is idempotent.
+9. External tools are replaceable.
+10. The core library stays independent of SSHFS, rclone, Tailscale and DNS.
+11. A future native mount protocol must fit without redesigning the product.
+12. An external discovery plugin must fit without redesigning the product.
