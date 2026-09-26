@@ -86,11 +86,11 @@ infra.example.com:53 {
 }
 ```
 
-To try it on your own machine, run it in Docker on port 5353 and set
-[`nameservers = ["127.0.0.1:5353"]`](#split-dns-and-custom-ports):
+To try it on your own machine, run it in Docker on port 10053 and set
+[`nameservers = ["127.0.0.1:10053"]`](#split-dns-and-custom-ports):
 
 ```sh
-docker run -d --name coredns -p 127.0.0.1:5353:53/udp -p 127.0.0.1:5353:53/tcp \
+docker run -d --name coredns -p 127.0.0.1:10053:53/udp -p 127.0.0.1:10053:53/tcp \
   -v "$PWD:/etc/coredns:ro" coredns/coredns:1.11.3 -conf /etc/coredns/Corefile
 ```
 
@@ -166,7 +166,7 @@ with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=age
 
 <Steps>
 
-1. Ask DNS directly. Add `@10.0.0.2`, or `@127.0.0.1 -p 5353`, to ask one server:
+1. Ask DNS directly. Add `@10.0.0.2`, or `@127.0.0.1 -p 10053`, to ask one server:
 
    ```console
    $ dig +short TXT _bifrost.infra.example.com
@@ -321,7 +321,7 @@ type = "dns"
 name = "infra"
 domain = "infra.example.com"
 nameservers = ["10.0.0.2"]            # port 53
-# nameservers = ["127.0.0.1:5353"]    # a lab resolver on another port
+# nameservers = ["127.0.0.1:10053"]   # a lab resolver on another port
 ```
 
 - Bifröst then asks only these servers, over UDP and TCP, and caches each answer for its TTL.
