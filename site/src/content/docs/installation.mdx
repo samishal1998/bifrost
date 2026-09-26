@@ -177,7 +177,8 @@ line means.
 Mounts outlive the daemon, so unmount first, then stop `bifrostd` and remove the binaries:
 
 ```sh
-bifrost unmount <id>            # for each mount in `bifrost mounts`
+bifrost unmount <id>                        # for each mount in `bifrost mounts`
+systemctl --user disable --now bifrost      # or stop bifrostd however you started it
 rm ~/.local/bin/bifrost ~/.local/bin/bifrostd ~/.local/bin/bifrost-tui
 ```
 
