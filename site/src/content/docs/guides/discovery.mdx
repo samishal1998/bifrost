@@ -112,7 +112,7 @@ A record is space-separated `key=value` tokens, and `v=bf1` must come first. Rec
 | `port` | node | 1–65535 |
 | `user` | node | remote user, a hint used only with `honor_hints` |
 | `path` | node | remote path, a hint used only with `honor_hints` |
-| `tags` | node | comma-separated, at most 32 |
+| `tags` | node | comma-separated, at most 32 tags and 256 bytes |
 | `id` | node | a native id, matched only by this provider's `include_ids` / `exclude_ids` |
 
 - **Identity is the node label** (`agent-01`), never `id=`. Labels have no dots, so an index can't send queries to
@@ -123,6 +123,7 @@ A record is space-separated `key=value` tokens, and `v=bf1` must come first. Rec
 - Changes show up on the first refresh after the record's TTL (resolvers cache). Without `nameservers`, the
   system resolver config is re-read on every refresh, so a network or VPN change is picked up.
 - DNSSEC is not checked, and the inline form with `host=` on the root record is not supported.
+- With no filter and no global allow, every node is discover-only.
 
 ## HTTP inventory
 

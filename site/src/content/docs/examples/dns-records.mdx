@@ -65,8 +65,8 @@ honor_hints = true
 
 - **The machine id is the node label**, and the mount lands at `~/machines/<id>`. `id=vm-4711` is only a native
   id, matched by this provider's `include_ids` and `exclude_ids`.
-- **Without `host=`** the node connects to `<node>.<domain>`, so `agent-01` needs its own A or AAAA record. ssh
-  resolves it when it connects.
+- **Without `host=`** the node connects to `<node>.<domain>`, so `agent-01` needs an A or AAAA record that your
+  system resolver can answer: ssh resolves it when it connects.
 - **`host=` and `port=` are always used.** `user=` and `path=` are hints: with `honor_hints = false`, `build-01`
   mounts as `ubuntu` from `~`, still on port 2222.
 
@@ -221,7 +221,7 @@ with nothing in between, so `nodes=agent-01,agent-02` would arrive as `nodes=age
 
 One DNS string holds at most 255 bytes. A longer record is several strings in one TXT record, and bf1 joins them
 **with nothing in between**, so keep the separating space inside one of the pieces, here at the end of the first.
-A whole record may be up to 2048 bytes.
+A whole record may be up to 2048 bytes, and each value, the `tags=` list included, up to 256.
 
 <Tabs syncKey="dns-host">
 <TabItem label="Zone file">
@@ -304,12 +304,7 @@ _bifrost.twice      IN TXT "v=bf1 host=10.0.0.25"
 | `_bifrost.twice` | node skipped as ambiguous | `ambiguous: 2 distinct bf1 records` |
 
 If no valid index record is left, the provider reports no machines. The same record published twice is not
-ambiguous. In the log, a skip looks like this:
-
-```text
-WARN discovery{provider=infra kind=dns}: bifrost_discovery::dns: bf1 index record skipped provider="infra" record="_bifrost.infra.example.com." reason="invalid dns label \"lab.other\": must match [a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-WARN discovery{provider=infra kind=dns}: bifrost_discovery::dns: bf1 node skipped provider="infra" record="_bifrost.dup-01.infra.example.com." reason="duplicate key \"host\""
-```
+ambiguous.
 
 ## Split DNS and custom ports
 
@@ -325,6 +320,9 @@ nameservers = ["10.0.0.2"]            # port 53
 ```
 
 - Bifröst then asks only these servers, over UDP and TCP, and caches each answer for its TTL.
+- `nameservers` is only for the bf1 records. ssh resolves `host=` names and the `<node>.<domain>` default with
+  your system resolver, so for a zone only Bifröst asks, publish `host=<ip>` (or have your system resolver forward
+  that zone).
 - Check against the same server: `dig @10.0.0.2 +short TXT _bifrost.infra.example.com`.
 - Without `nameservers`, Bifröst uses the system resolver and re-reads its config on every refresh.
 
