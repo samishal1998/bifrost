@@ -36,6 +36,7 @@
 
 	--bf-frame: rgb(229 240 255 / 0.14);
 	--bf-glow: rgb(45 212 191 / 0.35);
+	--bf-nav-hover: #60a5fa; /* Glacial Blue */
 }
 
 :root[data-theme='light'] {
@@ -71,6 +72,7 @@
 
 	--bf-frame: rgb(11 18 32 / 0.12);
 	--bf-glow: rgb(11 18 32 / 0.35);
+	--bf-nav-hover: #1d4ed8;
 }
 
 /* One aurora line under the header: teal into glacial blue, never a rainbow. */
