@@ -26,7 +26,7 @@ Every `POST` takes a JSON body: send `{}` when there is nothing to say. Errors c
 | `GET /v1/status` | — | `200` the full snapshot: daemon, config, providers, drivers, machines, mounts, conflicts, the last 200 events |
 | `GET /v1/machines` | — | `200` list of machines |
 | `GET /v1/mounts` | — | `200` list of mounts |
-| `GET /v1/mounts/{id}/log` | — | `200` the last 64 KiB of that mount's log, as lines |
+| `GET /v1/mounts/{id}/log` | — | `200 {"mount", "path", "lines": […]}`: the last 64 KiB of that mount's log. `404` when it has no log yet, `400` for an invalid id |
 | `GET /v1/drivers` | — | `200` list of driver probes |
 | `POST /v1/discover` | `{}` | `202 {}`. Every provider refreshes now |
 | `POST /v1/reconcile` | `{}` | `200` the plan: `[{"mount", "action"}]`. Re-probes drivers and runs one pass. It does not skip a retry backoff |
@@ -61,7 +61,7 @@ curl -s --unix-socket "$sock" -X POST -H 'Content-Type: application/json' -d '{"
   "desired": true,
   "held": false,
   "adopted": false,
-  "pid": 4242,
+  "pid": 4311,
   "failures": 0,
   "retry_in_secs": null,
   "last_error": null,

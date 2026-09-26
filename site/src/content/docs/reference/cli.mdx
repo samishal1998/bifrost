@@ -63,7 +63,7 @@ local = "build-artifacts"
 `mount` and `unmount` poll until the mount settles, for up to 60 seconds, then print one line per mount:
 
 ```text
-agent-01  mounted  /home/sami/machines/agent-01 (sshfs, pid 4242)
+agent-01  mounted  /home/sami/machines/agent-01 (sshfs, pid 4311)
 agent-01  failed: ssh preflight: Host key verification failed.
 agent-01  unmounted (held; 'bifrost mount agent-01' to resume)
 agent-01  unmount blocked: busy (files open); retry with --force
@@ -128,5 +128,5 @@ The socket default is the same as the CLI's. See the [TUI reference](/bifrost/re
 | `BIFROST_SOCKET` | all | Socket path (at most 103 bytes) |
 | `BIFROST_STATE_DIR` | `bifrostd` | State directory |
 | `BIFROST_LOG` | `bifrostd` | `error`, `warn`, `info` (default), `debug` or `trace` |
-| `NO_COLOR` | `bifrost-tui` | Any value turns colour off; the state glyphs remain |
+| `NO_COLOR` | `bifrost-tui` | Any non-empty value turns colour off; the state glyphs remain |
 | `SSH_AUTH_SOCK` | `bifrostd` | Your SSH agent, inherited by every ssh it runs |

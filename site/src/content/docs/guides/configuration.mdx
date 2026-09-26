@@ -98,8 +98,8 @@ If a discovered id collides with a static mount's `local`, the static mount wins
 
 - **Names** (machine names, `local`, provider names) are lowercase: `[a-z0-9][a-z0-9._-]{0,62}`. Uppercase gets a
   hint: `machines[0].name: "Agent-01": use lowercase ("agent-01")`.
-- **Durations** are a number and one unit: `500ms`, `30s`, `5m`, `1h`. Intervals are at least 1s,
-  `retry_initial` is at most `retry_max`, and `mount_timeout` is at most 5m.
+- **Durations** are a whole number and one unit (`ms`, `s`, `m` or `h`), such as `1500ms`, `30s`, `5m` or `1h`.
+  Every duration is at least 1s, `retry_initial` is at most `retry_max`, and `mount_timeout` is at most 5m.
 - **Expansion** of `~`, `$VAR` and `${VAR}` happens only in `mount.root`, `mount.ssh_config`, `discovery.url` and
   header values. `$$` is a literal `$`. An undefined variable is an error, never an empty string. Names, hosts and
   remote paths are never expanded; in a remote path `~` means the remote home.

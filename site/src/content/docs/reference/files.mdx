@@ -28,8 +28,8 @@ import { FileTree } from '@astrojs/starlight/components';
 - **`state.json`** is written atomically (temp file, sync, rename) with mode `0600` whenever a hold or a mount
   changes. The holds in it are your intent and always win; the mount records are only hints for adoption. A file
   that doesn't parse is renamed to `state.json.corrupt-<unix time>` and the daemon starts empty.
-- **`bifrostd.lock`** makes a second daemon on the same state directory exit with `bifrostd already running`. The
-  lock is released automatically if the daemon crashes.
+- **`bifrostd.lock`** makes a second daemon on the same state directory exit 1 with
+  `bifrostd: already running (lock …/bifrostd.lock)`. The lock is released automatically if the daemon crashes.
 
 ## Permissions
 

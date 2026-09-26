@@ -110,7 +110,7 @@ Bifröst mounts only on a missing or empty directory. A mount fails with `… is
 |---|---|
 | `bifrostd is not running (socket …)`, exit 3 | Start `bifrostd`, or point `--socket` / `BIFROST_SOCKET` at the right socket |
 | `path must be shorter than SUN_LEN`, exit 3 | The socket path is over 103 bytes. Set a shorter `BIFROST_SOCKET` |
-| `bifrostd already running`, exit 1 | Another daemon holds the lock in the state directory. `bifrost daemon status` shows it |
+| `bifrostd: already running (lock …/bifrostd.lock)`, exit 1 | Another daemon holds the lock in the state directory. `bifrost daemon status` shows it |
 | `mount.root change requires restart` | Restart the daemon to move the root |
 | config errors in `bifrost status` | The last edit was invalid and the previous config is still running. Run `bifrost config check` |
 

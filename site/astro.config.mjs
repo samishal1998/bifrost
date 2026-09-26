@@ -15,7 +15,6 @@ export default defineConfig({
 			logo: {
 				light: './src/assets/logo-ink-dark.png',
 				dark: './src/assets/logo-ink-light.png',
-				alt: 'Bifröst',
 				replacesTitle: true,
 			},
 			favicon: '/favicon.png',

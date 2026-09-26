@@ -89,8 +89,9 @@ error becomes the mount's `last_error`.
 ## macOS
 
 <Aside type="caution">
-macOS support is compile-checked only: the macOS code paths build and pass lint, but runtime behaviour on a Mac
-has not been exercised yet.
+macOS support is built but not field-tested: the release binaries are built on GitHub's macOS runners and CI builds
+and unit-tests the workspace there, but mounting on a real Mac (macFUSE, FUSE-T, `rclone nfsmount`) has not been
+exercised yet.
 </Aside>
 
 - **FUSE detection:** macFUSE at `/Library/Filesystems/macfuse.fs`; FUSE-T at

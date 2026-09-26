@@ -41,7 +41,8 @@ The file is `$BIFROST_CONFIG`, else `~/.config/bifrost/config.toml`. Unknown key
 | `retry_initial` | `"2s"` | First retry delay after a failure |
 | `retry_max` | `"1m"` | Longest retry delay. At least `retry_initial` |
 
-Durations are a whole number and one unit: `ms`, `s`, `m` or `h`. Intervals are at least 1s.
+Durations are a whole number and one unit: `ms`, `s`, `m` or `h`. Every duration is at least 1s and at most
+366 days.
 
 ## `[policy.allow]` and `[policy.deny]`
 

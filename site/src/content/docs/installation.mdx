@@ -64,9 +64,9 @@ curl -fsSL https://samishal1998.github.io/bifrost/install.sh | BIFROST_INSTALL_D
 Each tarball holds one directory, `bifrost-<target>/`, with the three binaries, `README.md`, `LICENSE-MIT` and
 `LICENSE-APACHE`.
 
-<Aside type="caution" title="macOS is untested at runtime">
-The macOS builds compile and pass their checks, but nobody has run them against real mounts yet. Linux is the
-tested platform. Reports from Mac users are welcome.
+<Aside type="caution" title="macOS is not field-tested">
+The macOS binaries are built and unit-tested on GitHub's macOS runners, but mounting on a real Mac has not been
+exercised yet. Linux is the tested platform. Reports from Mac users are welcome.
 </Aside>
 
 ## Manual download
@@ -119,7 +119,8 @@ You need Rust 1.89 or newer (edition 2024).
 git clone https://github.com/samishal1998/bifrost
 cd bifrost
 cargo build --release
-mkdir -p ~/.local/bin && install -m 755 target/release/{bifrost,bifrostd,bifrost-tui} ~/.local/bin/
+mkdir -p ~/.local/bin
+install -m 755 target/release/bifrost target/release/bifrostd target/release/bifrost-tui ~/.local/bin/
 ```
 
 With `CARGO_TARGET_DIR` set, the binaries are in `$CARGO_TARGET_DIR/release/` instead.
