@@ -95,7 +95,9 @@ _bifrost.infra.example.com. TXT "v=bf1 node=agent-01 host=10.0.0.5 port=22 user=
 _bifrost.infra.example.com. TXT "v=bf1 node=agent-02 tags=dev"
 ```
 
-Beyond about a dozen machines, list them in an index value instead, and give each one a record of its own:
+Past about a dozen values (about 5 without `nameservers` on Linux when resolv.conf lacks `options edns0`), the
+answer needs TCP, and Bifröst retries over TCP by itself. If TCP port 53 is blocked, or each machine should publish
+its own record, list the machines in an index value and give each one a record of its own:
 
 ```text
 _bifrost.infra.example.com.          TXT "v=bf1 nodes=build-01,build-02"
@@ -110,12 +112,12 @@ how to check them, and when to use the index: [DNS records](/bifrost/examples/dn
 
 A value is space-separated `key=value` tokens, and `v=bf1` must come first. Values that don't start with
 `v=bf1` (SPF and friends) are ignored. *Root* keys go only in values at `_bifrost.<domain>`; *machine* keys go in an
-inline value or a per-node record.
+inline value or a per-node record (at `_bifrost.<node>.<domain>`, without `node=`).
 
 | Key | Where | Value |
 |---|---|---|
 | `v` | every value | `bf1`, first |
-| `node` | root | the node label, `[a-z0-9-]`, no dots. Makes the value an inline node record. Not with `nodes=` |
+| `node` | root | the node label: lowercase `[a-z0-9-]`, 1–63 characters, a letter or digit at each end, no dots. Makes the value an inline node record. Not with `nodes=` |
 | `nodes` | root | an index: comma-separated node labels. 256 nodes at most, inline and indexed together |
 | `host` | machine | connect target, hostname or IP. Default `<node>.<domain>` |
 | `port` | machine | 1–65535 |
@@ -130,8 +132,6 @@ inline value or a per-node record.
   **whole node**. Two different values for one node, or a node both inline and in `nodes=`, are ambiguous, and
   the node is skipped.
 - Unknown keys, `driver=` included, are ignored.
-- A truncated UDP answer is retried over TCP, so a record set bigger than one UDP reply (about a dozen values)
-  needs a server that answers on TCP port 53.
 - Changes show up on the first refresh after the record's TTL (resolvers cache). Without `nameservers`, the
   system resolver config is re-read on every refresh, so a network or VPN change is picked up.
 - DNSSEC is not checked.

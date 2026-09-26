@@ -322,8 +322,10 @@ _bifrost.example.com. TXT "v=bf1 node=agent-01 host=10.0.0.5 port=22 user=sami t
 _bifrost.example.com. TXT "v=bf1 node=agent-02 tags=dev"
 ```
 
-Beyond about a dozen machines, list node labels in an index value and give each node a record of its own. Both
-forms mix in one record set:
+Past about a dozen values (about 5 without `nameservers` on Linux when resolv.conf lacks `options edns0`), the
+answer needs TCP, and Bifröst retries over TCP by itself. If TCP port 53 is blocked, or each machine should publish
+its own record, list node labels in an index value and give each node a record of its own. Both forms mix in one
+record set:
 
 ```dns
 _bifrost.example.com.          TXT "v=bf1 nodes=build-01,build-02"
@@ -340,8 +342,7 @@ _bifrost.build-02.example.com. TXT "v=bf1 host=10.0.0.19 tags=ci"
 - A value over 2 KiB, a duplicate key, or any key that fails validation (e.g. `host=-oProxyCommand=…`) rejects
   the **whole node**. Two different values for one node, or a node both inline and in `nodes=`, are ambiguous,
   and the node is skipped.
-- A truncated UDP answer is retried over TCP: a record set bigger than one UDP reply (about a dozen values)
-  needs a server that answers on TCP port 53.
+- A truncated UDP answer is retried over TCP. If TCP fails too, the provider fails and keeps its last good view.
 - Changes show up on the first refresh after the record TTL (resolvers cache). Without `nameservers`, the system
   resolver config is re-read on every refresh, so a network or VPN change is picked up. DNSSEC is not checked.
 

@@ -206,7 +206,7 @@ with nothing in between, so `tags=dev,agent` would arrive as `tags=devagent`.
    ```
 
 4. Answers are cached for their TTL (`$TTL 300` above), so a record you just changed can take that long to show.
-   A machine still missing after that was skipped. The daemon log says why
+   A machine still missing after that was skipped. The daemon log says why, unless its value lacks `node=`
    ([see below](#what-gets-rejected)):
 
    ```sh
@@ -241,7 +241,8 @@ One more TXT record named `_bifrost.infra`, its content two quoted strings on on
 </TabItem>
 <TabItem label="Route 53">
 
-One more `Value` in the `_bifrost` record set, both strings in it:
+Add one more `Value` to the `ResourceRecords` of the `_bifrost.infra.example.com` UPSERT above (UPSERT replaces the
+whole set), both strings in it:
 
 ```json
 { "Value": "\"v=bf1 node=gpu-01 host=gpu-01.datacenter-eu-west.infra.example.com port=2222 user=ml-runner path=/srv/datasets/imagenet-2012/train/shards \" \"tags=gpu,cuda,cuda-12,a100,a100-80gb,ml,training,eu-west,rack-12,dev,shared,nightly,long-jobs,team-vision,team-nlp,team-speech,team-robotics id=vm-5821\"" }
@@ -284,6 +285,7 @@ _bifrost            IN TXT "v=bf1 node=both nodes=web-02"
 _bifrost            IN TXT "v=bf1 node=web-01 host=10.0.0.26"
 _bifrost            IN TXT "v=bf1 nodes=web-01,db-01"
 _bifrost            IN TXT "v=bf1 nodes=lab.other"
+_bifrost            IN TXT "v=bf1 name=web-03 host=10.0.0.28"
 
 _bifrost.db-01      IN TXT "v=bf1 node=db-01 host=10.0.0.27"
 ```
@@ -297,6 +299,7 @@ _bifrost.db-01      IN TXT "v=bf1 node=db-01 host=10.0.0.27"
 | `node=both nodes=web-02` | `both` skipped; `web-02` is never looked up | `node= and nodes= in one value` |
 | `node=web-01`, and `web-01` in `nodes=` | node skipped as ambiguous; never looked up | `ambiguous: inline and in nodes=` |
 | `nodes=lab.other` | that index value is skipped; the other values still count | `invalid dns label "lab.other": must match [a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?` |
+| `name=web-03` (no `node=`) | ignored: a root value without `node=` is an index value, and this one lists no nodes | none. `no valid bf1 root record` appears only when nothing else in the set is valid |
 | `_bifrost.db-01` | node skipped: `node=` belongs only in the root record set | `node= in a node record (root values only)` |
 
 If nothing valid is left, the provider reports no machines. The same value published twice, even split into
@@ -304,10 +307,11 @@ strings differently, is not ambiguous.
 
 ## Large fleets: index + per-node records
 
-One UDP reply holds 1232 bytes, about 12 to 15 short values. Bifröst retries a truncated answer over TCP, so a
-bigger record set works as long as your DNS server answers on TCP port 53. Use the index form instead when:
+One UDP reply holds 1232 bytes, about 12 to 15 short values (512 bytes, about 5, when Bifröst uses the system
+resolver on Linux and resolv.conf lacks `options edns0`). Bifröst retries a truncated answer over TCP, so a bigger
+record set works as long as your DNS server answers on TCP port 53. If it doesn't, the lookup fails and the provider
+keeps its last good view. Use the index form when:
 
-- your machines outgrow one UDP reply,
 - a firewall between Bifröst and the server blocks TCP port 53, or
 - each machine publishes its own record, say with a dynamic DNS key scoped to its own name.
 
@@ -322,8 +326,8 @@ _bifrost.build-01   IN TXT "v=bf1 host=10.0.0.18 port=2222 user=ci path=/srv/bui
 _bifrost.gpu-01     IN TXT "v=bf1 host=10.0.0.40 tags=gpu"
 ```
 
-- One index value names about 25 machines, and several index values add up, so with short labels the root record
-  set fits one UDP reply up to about 100 machines. Each indexed machine costs one more query.
+- A `nodes=` list holds up to 256 bytes, about 25 short labels, and several index values add up: about 100 indexed
+  machines fit a 1232-byte reply, about 25 a 512-byte one. Each indexed machine costs one more query.
 - 256 machines at most, inline and indexed together.
 - A machine is inline or in `nodes=`, never both: that is [ambiguous](#what-gets-rejected), and it is skipped.
 
