@@ -24,13 +24,13 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
-          - { target: x86_64-apple-darwin, os: macos-14 }
-          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-15 }
+          - { target: aarch64-apple-darwin, os: macos-15 }
     runs-on: ${{ matrix.os }}
     env:
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Toolchain
@@ -51,7 +51,7 @@ jobs:
           mkdir "$d"
           cp "target/$TARGET/release/"{bifrost,bifrostd,bifrost-tui} README.md LICENSE-MIT LICENSE-APACHE "$d/"
           tar -czf "$d.tar.gz" "$d"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bifrost-${{ matrix.target }}
           path: bifrost-${{ matrix.target }}.tar.gz
@@ -64,7 +64,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: bifrost-*
