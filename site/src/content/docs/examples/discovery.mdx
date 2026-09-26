@@ -263,10 +263,9 @@ user = "ubuntu"
 With these DNS records:
 
 ```text
-_bifrost            IN TXT "v=bf1 nodes=agent-01,agent-02,db-01"
-_bifrost.agent-01   IN TXT "v=bf1 host=10.0.0.11"
-_bifrost.agent-02   IN TXT "v=bf1 host=10.0.0.12"
-_bifrost.db-01      IN TXT "v=bf1 host=10.0.0.30 tags=prod"
+_bifrost            IN TXT "v=bf1 node=agent-01 host=10.0.0.11"
+_bifrost            IN TXT "v=bf1 node=agent-02 host=10.0.0.12"
+_bifrost            IN TXT "v=bf1 node=db-01 host=10.0.0.30 tags=prod"
 ```
 
 | Machine | Reported by | Verdict | Why |

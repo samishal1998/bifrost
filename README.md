@@ -314,23 +314,37 @@ records are skipped one by one with a warning in the daemon log.
   because you shared this machine with them (`ShareeNode`; `tailscale status` hides them too);
 - with no filter and no global allow, every peer is discover-only.
 
-**DNS TXT, `bf1` format** (`type = "dns"`, trust 3). One index record, then one record per node:
+**DNS TXT, `bf1` format** (`type = "dns"`, trust 3). One TXT record set at `_bifrost.<domain>`, one value per
+machine:
 
 ```dns
-_bifrost.example.com.          TXT "v=bf1 nodes=agent-01,agent-02"
-_bifrost.agent-01.example.com. TXT "v=bf1 host=10.0.0.5 port=22 user=sami tags=dev,agent path=/home/sami"
-_bifrost.agent-02.example.com. TXT "v=bf1 tags=dev"
+_bifrost.example.com. TXT "v=bf1 node=agent-01 host=10.0.0.5 port=22 user=sami tags=dev,agent path=/home/sami"
+_bifrost.example.com. TXT "v=bf1 node=agent-02 tags=dev"
 ```
 
-- Keys: `v` (must come first), `nodes`, `host` (default `<node>.<domain>`), `port`, `user`, `tags`, `path` and
-  `id` (a native id only). Unknown keys, `driver=` included, are ignored. Other TXT records (SPF…) are ignored.
+Past about a dozen values (about 5 without `nameservers` on Linux when resolv.conf lacks `options edns0`), the
+answer needs TCP, and Bifröst retries over TCP by itself. If TCP port 53 is blocked, or each machine should publish
+its own record, list node labels in an index value and give each node a record of its own. Both forms mix in one
+record set:
+
+```dns
+_bifrost.example.com.          TXT "v=bf1 nodes=build-01,build-02"
+_bifrost.build-01.example.com. TXT "v=bf1 host=10.0.0.18 tags=ci"
+_bifrost.build-02.example.com. TXT "v=bf1 host=10.0.0.19 tags=ci"
+```
+
+- Keys: `v` (must come first); root values only: `node` (an inline node record) or `nodes` (an index), never
+  both; node keys: `host` (default `<node>.<domain>`), `port`, `user`, `tags`, `path` and `id` (a native id only).
+  Unknown keys, `driver=` included, are ignored. Other TXT records (SPF…) are ignored.
 - **Identity is the node label**, never `id=`. Labels have no dots, so an index can't send queries to another
-  domain. There are at most 256 nodes, and every name is queried absolute (no search domains).
-- A record over 2 KiB, a duplicate key, or any key that fails validation (e.g. `host=-oProxyCommand=…`) rejects
-  the **whole node**. Two different bf1 records for one node are ambiguous, and the node is skipped.
+  domain. There are at most 256 nodes, inline and indexed together, and every name is queried absolute (no
+  search domains).
+- A value over 2 KiB, a duplicate key, or any key that fails validation (e.g. `host=-oProxyCommand=…`) rejects
+  the **whole node**. Two different values for one node, or a node both inline and in `nodes=`, are ambiguous,
+  and the node is skipped.
+- A truncated UDP answer is retried over TCP. If TCP fails too, the provider fails and keeps its last good view.
 - Changes show up on the first refresh after the record TTL (resolvers cache). Without `nameservers`, the system
-  resolver config is re-read on every refresh, so a network or VPN change is picked up. DNSSEC and the inline
-  root-record form of PRD §6.3 are not supported.
+  resolver config is re-read on every refresh, so a network or VPN change is picked up. DNSSEC is not checked.
 
 **HTTP JSON** (`type = "http"`, trust 2): `GET url` with your `headers`, which may use `${VAR}` for secrets.
 
