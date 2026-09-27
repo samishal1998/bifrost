@@ -576,6 +576,9 @@ cargo clippy --target aarch64-apple-darwin -p bifrost-core -p bifrost-config -p 
 Crates: `bifrost-core` (models, policy, registry, planner; no I/O), `bifrost-config`, `bifrost-discovery`,
 `bifrost-mount`, `bifrost-client`, `bifrost-daemon` (`bifrostd`), `bifrost-cli` (`bifrost`), `bifrost-tui`.
 
+The internal engineering guides (architecture, design decisions, one guide per crate, testing, release) start at
+[docs/dev-guides/README.md](docs/dev-guides/README.md).
+
 ## License
 
 Licensed under either of
