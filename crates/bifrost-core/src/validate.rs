@@ -140,7 +140,7 @@ impl User {
     }
 }
 
-/// "~" | "~/<rel>" | "/" | "/<abs>"; ≤1024 bytes; no control chars (<0x20, 0x7f); no ':' ; no ".." component.
+/// "~" | "~/<rel>" | "/" | "/<abs>"; ≤1024 bytes; no control chars (char::is_control: C0, 0x7f and C1 0x80–0x9f); no ':' ; no ".." component.
 /// "/" parses (PRD §6.1 root mounts, B2).
 /// Spaces are allowed: always a single argv element, never placed inside --sftp-ssh.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

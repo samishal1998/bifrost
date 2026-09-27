@@ -1121,7 +1121,7 @@ never read, and none is written).
 **Source.** PRD §8.2; contract §6 "rclone argv"; A23; B13; S2 sign-off 3; S3 sign-off 1; d354ab2, 785e351.
 
 <a id="no-pid-signalling-lazy-detach"></a>
-### No pid is ever signalled; force means lazy detach
+### No recorded or adopted pid is ever signalled; force means lazy detach
 
 **Status:** accepted. It fixes Changes from B #1 and #2. Recorded as §15 #15.
 
